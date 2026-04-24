@@ -1,0 +1,32 @@
+[package]
+name = "axum-playground"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[dependencies]
+axum = "0.8.9"
+tokio = { version = "1.52.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.8", features = ["cors", "limit", "trace"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+base64 = "0.22.1"
+ciborium = "0.2.2"
+futures-util = "0.3.31"
+time = { version = "0.3.47", features = ["formatting", "parsing", "serde"] }
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
+utoipa = "5.4.0"
+utoipa-axum = "0.2.0"
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+validator = { version = "0.20.0", features = ["derive"] }
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+jsonwebtoken = "10.3.0"
+moka = { version = "0.12.15", features = ["future"] }
+firestore = "0.48.0"
+google-cloud-auth = "1.9.0"
+rustls = { version = "0.23.37", features = ["ring"] }

@@ -1,0 +1,41 @@
+substitutions:
+  _REGION: europe-west4
+  _AR_REPOSITORY: app-images
+  _IMAGE_NAME: axum-playground
+  _SERVICE: axum-playground
+  _DEPLOY: "false"
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+          IMAGE_URI="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+          LATEST_URI="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:latest"
+
+          docker build \
+            --build-arg VERSION="${SHORT_SHA}" \
+            -t "${IMAGE_URI}" \
+            -t "${LATEST_URI}" \
+            .
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+          if [[ "${_DEPLOY}" != "true" ]]; then
+            echo "Skipping Cloud Run deploy because _DEPLOY=${_DEPLOY}."
+            exit 0
+          fi
+
+          IMAGE_URI="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+
+          gcloud run deploy "${_SERVICE}" \
+            --image "${IMAGE_URI}" \
+            --platform managed \
+            --region "${_REGION}"
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/${_IMAGE_NAME}:latest
