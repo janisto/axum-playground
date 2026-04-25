@@ -82,7 +82,7 @@ pub async fn list_items_handler(
     Query(query): Query<ItemsListQuery>,
 ) -> Response {
     if let Some(limit) = query.limit
-        && limit > MAX_LIMIT
+        && (limit <= 0 || limit > MAX_LIMIT)
     {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,

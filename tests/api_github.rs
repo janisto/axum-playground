@@ -273,6 +273,30 @@ async fn github_activity_uses_link_header_and_validates_cursor() {
         .await
         .expect("request should succeed");
     assert_eq!(invalid_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let zero_limit = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=0")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(zero_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let negative_limit = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=-10")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(negative_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

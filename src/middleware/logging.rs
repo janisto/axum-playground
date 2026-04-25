@@ -149,10 +149,10 @@ fn parse_traceparent(value: &str) -> Option<TraceContext> {
         return None;
     }
 
-    if !is_lower_hex(version, 2)
-        || !is_lower_hex(trace_id, 32)
-        || !is_lower_hex(span_id, 16)
-        || !is_lower_hex(trace_flags, 2)
+    if !is_hex(version, 2)
+        || !is_hex(trace_id, 32)
+        || !is_hex(span_id, 16)
+        || !is_hex(trace_flags, 2)
         || trace_id == "00000000000000000000000000000000"
         || span_id == "0000000000000000"
     {
@@ -165,7 +165,7 @@ fn parse_traceparent(value: &str) -> Option<TraceContext> {
     })
 }
 
-fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+fn is_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 

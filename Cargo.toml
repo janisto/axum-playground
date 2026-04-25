@@ -26,7 +26,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 jsonwebtoken = "10.3.0"
-moka = { version = "0.12.15", features = ["future"] }
 firestore = "0.48.0"
 google-cloud-auth = "1.9.0"
 rustls = { version = "0.23.37", features = ["ring"] }

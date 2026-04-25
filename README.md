@@ -75,6 +75,8 @@ Copy `.env.example` to `.env` and customize as needed:
 cp .env.example .env
 ```
 
+`just` commands auto-load `.env` through the repo Justfile. If you run `cargo` directly instead of `just`, export the environment variables yourself.
+
 ### Environment Variables
 
 | Variable | Description | Default |
@@ -96,6 +98,7 @@ Notes:
 - Emulator hosts must omit the protocol prefix, for example `127.0.0.1:9099` and `127.0.0.1:8080`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
+- `GOOGLE_APPLICATION_CREDENTIALS` and `FIRESTORE_EMULATOR_HOST` are intentionally kept in the Rust config surface for future explicit wiring, even though the current runtime mainly relies on ADC behavior and emulator-specific test helpers.
 
 ## Local Development
 
@@ -135,6 +138,7 @@ src/
 	app.rs            # Root router and middleware composition
 	auth/             # Firebase auth extraction and verification
 	config.rs         # Environment-backed application configuration
+	error.rs          # Startup and application error types
 	http/
 		health.rs       # Root health endpoint
 		v1/             # Versioned API routes and docs wiring
@@ -142,6 +146,7 @@ src/
 	pagination/       # Cursor and RFC 8288 link helpers
 	problem/          # Problem Details responses and negotiation
 	services/         # GitHub and profile service implementations
+	shutdown.rs       # Graceful shutdown coordination
 	state.rs          # Shared application state
 	telemetry.rs      # Tracing subscriber initialization
 	lib.rs            # Reusable app construction

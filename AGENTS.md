@@ -96,7 +96,16 @@ Key recipes:
 - `just audit` - run dependency vulnerability checks
 - `just docker-build` - build the image, preferring Podman and falling back to Docker
 
-Use `just` for standard repo workflows. For focused validation when there is no precise Justfile target, targeted `cargo test --locked --test ...` commands are acceptable.
+Use `just` for standard repo workflows. For focused validation when there is no precise Justfile target, targeted `cargo test --locked --test ...` commands are acceptable only when the dependency graph is expected to stay unchanged.
+
+### Cargo.lock
+
+- `Cargo.lock` is generated and maintained by Cargo. Do not edit it by hand.
+- This repository is an application, so keep `Cargo.lock` checked in.
+- Use `--locked` only for deterministic validation when the existing lockfile should remain unchanged. Cargo will error if the lockfile is missing or if resolution would change.
+- If a manifest or feature change requires a lockfile update, let Cargo rewrite `Cargo.lock` by running the relevant Cargo command without `--locked`, then rerun the locked validation step.
+- Treat `cargo update` and `cargo generate-lockfile` as intentional lockfile-refresh commands. They can rewrite dependency resolution broadly, so do not use them as a routine fix for a small manifest edit.
+- If a lockfile-refresh command introduces unrelated churn, stop and ask before proceeding instead of compensating with manual `Cargo.lock` edits.
 
 ---
 
@@ -371,13 +380,15 @@ Responses:
 
 ### Validation Commands
 
-Use the narrowest relevant command first:
+Use the narrowest relevant command first when the lockfile is expected to remain unchanged:
 
 - `cargo test --locked --test api_health`
 - `cargo test --locked --test api_hello`
 - `cargo test --locked --test api_items`
 - `cargo test --locked --test api_profile`
 - `cargo test --locked --test firestore_emulator`
+
+If `Cargo.toml` or dependency features changed and Cargo needs to refresh `Cargo.lock`, run the narrow validation command once without `--locked`, then rerun the locked command after the lockfile settles.
 
 Then use repo-level checks as appropriate:
 

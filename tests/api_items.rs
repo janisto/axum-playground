@@ -158,6 +158,45 @@ async fn list_items_rejects_invalid_cursor_and_category() {
 }
 
 #[tokio::test]
+async fn list_items_rejects_non_positive_limit() {
+    let zero_limit = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/items?limit=0")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(zero_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let zero_limit_body: ProblemDetails = read_json_body(zero_limit).await;
+    assert_eq!(
+        zero_limit_body.status,
+        StatusCode::UNPROCESSABLE_ENTITY.as_u16()
+    );
+
+    let negative_limit = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/items?limit=-10")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(negative_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let negative_limit_body: ProblemDetails = read_json_body(negative_limit).await;
+    assert_eq!(
+        negative_limit_body.status,
+        StatusCode::UNPROCESSABLE_ENTITY.as_u16()
+    );
+}
+
+#[tokio::test]
 async fn openapi_includes_items_path() {
     let response = build_app(test_state())
         .oneshot(
