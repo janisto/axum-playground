@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Get all closed PR numbers
         id: get_prs
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           retries: 3
           script: |
