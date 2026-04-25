@@ -1,0 +1,70 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "quarterly"
+      time: "08:00"
+      timezone: "Europe/Helsinki"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    groups:
+      updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+      major-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "quarterly"
+      time: "08:30"
+      timezone: "Europe/Helsinki"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    groups:
+      updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+      major-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "quarterly"
+      time: "09:00"
+      timezone: "Europe/Helsinki"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    groups:
+      updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+          - "minor"
+      major-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "major"

@@ -1,0 +1,48 @@
+name: App code quality (linting and formatting)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install QA tools
+        run: cargo install --locked just cargo-deny cargo-audit
+
+      - name: Format check
+        run: just fmt-check
+
+      - name: Lint
+        run: just lint
+
+      - name: Dependency policy
+        run: just deny
+
+      - name: Security audit
+        run: just audit

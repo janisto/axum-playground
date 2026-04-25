@@ -1,0 +1,35 @@
+# Auto-label PRs based on changed file paths
+
+app:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/**'
+          - 'tests/**'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'Justfile'
+          - 'rust-toolchain.toml'
+          - 'deny.toml'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'README.md'
+          - 'plans/**'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'Dockerfile'
+          - '.dockerignore'
+          - 'cloudbuild.yaml'
+
+feature:
+  - head-branch: ['^feature', 'feature']
+
+bug:
+  - head-branch: ['^bug', 'bug']
+
+improvement:
+  - head-branch: ['^improve', 'improve', 'improvement']

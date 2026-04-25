@@ -1,0 +1,78 @@
+name: App build, tests and coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install test tools
+        run: cargo install --locked just cargo-nextest
+
+      - name: Build
+        run: just build
+
+      - name: Run tests
+        run: just test
+
+      - name: Run doctests
+        run: just test-doc
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: llvm-tools-preview
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install coverage tools
+        run: cargo install --locked just cargo-nextest cargo-llvm-cov
+
+      - name: Generate lcov report
+        run: just coverage-lcov
+
+      - name: Generate HTML coverage report
+        run: just coverage-html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.lcov
+            target/llvm-cov/html
+          if-no-files-found: error
