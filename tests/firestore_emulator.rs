@@ -1,7 +1,11 @@
+use std::time::Duration;
+
 use axum_playground::{
     AppConfig, CreateProfileParams, ProfileService, ProfileServiceError, UpdateProfileParams,
 };
 
+const EMULATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const EMULATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PROJECT_ID: &str = "demo-test-project";
 
 #[tokio::test]
@@ -9,6 +13,8 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
     let Some(emulator_host) = emulator_host() else {
         return;
     };
+
+    assert_emulator_reachable(&emulator_host).await;
 
     flush_emulator(&emulator_host, PROJECT_ID).await;
 
@@ -107,6 +113,21 @@ fn emulator_host() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+async fn assert_emulator_reachable(host: &str) {
+    let host = host
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+
+    tokio::time::timeout(
+        EMULATOR_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(host),
+    )
+    .await
+    .expect("connecting to Firestore emulator timed out")
+    .expect("connecting to Firestore emulator should succeed");
+}
+
 async fn flush_emulator(host: &str, project_id: &str) {
     let host = host
         .trim()
@@ -115,7 +136,12 @@ async fn flush_emulator(host: &str, project_id: &str) {
     let url =
         format!("http://{host}/emulator/v1/projects/{project_id}/databases/(default)/documents");
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(EMULATOR_REQUEST_TIMEOUT)
+        .build()
+        .expect("emulator flush client should build");
+
+    let response = client
         .delete(url)
         .send()
         .await

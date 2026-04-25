@@ -64,6 +64,7 @@ impl ProblemDetails {
 
         let status = StatusCode::from_u16(response_problem.status)
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        response_problem.status = status.as_u16();
 
         let mut response = if prefers_cbor {
             let mut body = Vec::new();
@@ -154,11 +155,12 @@ pub fn ensure_vary(headers: &mut HeaderMap, values: impl IntoIterator<Item = &'s
 #[cfg(test)]
 mod tests {
     use axum::{
+        body::to_bytes,
         http::{HeaderMap, HeaderValue, StatusCode, header},
         response::IntoResponse,
     };
 
-    use super::{ensure_vary, problem_response, request_host, request_scheme};
+    use super::{ProblemDetails, ensure_vary, problem_response, request_host, request_scheme};
 
     #[test]
     fn ensure_vary_merges_without_duplicates() {
@@ -210,5 +212,22 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("</schemas/ErrorModel.json>; rel=\"describedBy\"")
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_problem_status_normalizes_body_and_http_status() {
+        let response = ProblemDetails::new(42, "invalid")
+            .into_response(&HeaderMap::new(), "http", "localhost")
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("problem body should be readable");
+        let problem: ProblemDetails =
+            serde_json::from_slice(&body).expect("problem body should deserialize");
+
+        assert_eq!(problem.status, StatusCode::INTERNAL_SERVER_ERROR.as_u16());
     }
 }
