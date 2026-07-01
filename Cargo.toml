@@ -9,7 +9,7 @@ license = "MIT"
 axum = "0.8.9"
 tokio = { version = "1.52.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.8", features = ["cors", "limit", "trace"] }
+tower-http = { version = "0.7.0", features = ["cors", "limit", "trace"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 base64 = "0.22.1"
@@ -26,6 +26,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 jsonwebtoken = "10.3.0"
-firestore = "0.48.0"
+firestore = "0.49.0"
 google-cloud-auth = "1.9.0"
 rustls = { version = "0.23.37", features = ["ring"] }
