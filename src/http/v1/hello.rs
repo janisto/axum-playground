@@ -14,6 +14,7 @@ use crate::{
     http::codec::{decode_request_body, success_response},
     problem::problem_response,
     state::AppState,
+    validation::valid_name,
 };
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -70,8 +71,7 @@ pub async fn create_hello_handler(headers: HeaderMap, body: Bytes) -> Response {
         Err(error) => return error.into_response(&headers),
     };
 
-    let name_len = input.name.chars().count();
-    if !(1..=100).contains(&name_len) {
+    if !valid_name(&input.name) {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",

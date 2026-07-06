@@ -16,11 +16,9 @@ use crate::{
         decode_request_body, no_content_response, success_response, success_response_with_headers,
     },
     problem::problem_response,
-    services::profile::{
-        CreateProfileParams, Profile, ProfileServiceError, UpdateProfileParams, valid_email,
-        valid_name, valid_phone_number,
-    },
+    services::profile::{CreateProfileParams, Profile, ProfileServiceError, UpdateProfileParams},
     state::AppState,
+    validation::{valid_email, valid_name, valid_phone_number},
 };
 
 #[derive(Debug, Deserialize, ToSchema)]

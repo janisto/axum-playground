@@ -9,7 +9,6 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::OnceCell;
 use tracing::{info, warn};
 use utoipa::ToSchema;
-use validator::ValidateEmail;
 
 use crate::config::AppConfig;
 
@@ -437,33 +436,6 @@ fn timestamp_now() -> String {
         .expect("timestamp should format as rfc3339")
 }
 
-pub fn valid_name(value: &str) -> bool {
-    let len = value.chars().count();
-    (1..=100).contains(&len)
-}
-
-pub fn valid_email(value: &str) -> bool {
-    value.validate_email()
-}
-
-pub fn valid_phone_number(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix('+') else {
-        return false;
-    };
-
-    let mut digits = rest.chars();
-    let Some(first) = digits.next() else {
-        return false;
-    };
-    if !matches!(first, '1'..='9') {
-        return false;
-    }
-
-    let remaining = digits.collect::<Vec<_>>();
-    let total_digits = 1 + remaining.len();
-    (7..=15).contains(&total_digits) && remaining.iter().all(|digit| digit.is_ascii_digit())
-}
-
 fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> ProfileServiceError {
     match error {
         FirestoreError::DataConflictError(_) => match mutation {
@@ -480,16 +452,8 @@ fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> Prof
 mod tests {
     use super::{
         CreateProfileParams, MockProfileService, ProfileService, ProfileServiceError,
-        UpdateProfileParams, valid_phone_number,
+        UpdateProfileParams,
     };
-
-    #[test]
-    fn phone_validation_matches_e164_rules() {
-        assert!(valid_phone_number("+358401234567"));
-        assert!(!valid_phone_number("358401234567"));
-        assert!(!valid_phone_number("+058401234567"));
-        assert!(!valid_phone_number("+12"));
-    }
 
     #[tokio::test]
     async fn mock_service_normalizes_email_and_phone() {

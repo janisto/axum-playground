@@ -178,6 +178,7 @@ src/
   shutdown.rs       # ctrl_c + SIGTERM graceful shutdown
   state.rs          # AppState construction and test/service composition
   telemetry.rs      # tracing subscriber initialization
+  validation.rs     # shared request validation helpers
   lib.rs            # reusable app exports
   main.rs           # thin startup entrypoint
 tests/
@@ -260,7 +261,7 @@ Common helpers:
 ### Request Decoding & Validation
 
 - For JSON/CBOR request bodies, use `decode_request_body(...)`.
-- Validate inputs explicitly with `validator` or route-specific checks after decoding.
+- Validate inputs explicitly with shared validation helpers or route-specific checks after decoding.
 - Use `400 Bad Request` for malformed syntax or cursor format failures.
 - Use `422 Unprocessable Entity` for validation failures on otherwise well-formed input.
 
