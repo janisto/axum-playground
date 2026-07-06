@@ -55,12 +55,12 @@ Axum Playground is a Rust 2024 application built with Axum 0.8.x and Tokio. It p
 
 - Rust 1.95, edition 2024
 - Axum 0.8.9
-- Tokio 1.52.1
-- Tower 0.5.x and tower-http 0.6.x
+- Tokio 1.52.3
+- Tower 0.5.x and tower-http 0.7.x
 - Utoipa 5.x with utoipa-swagger-ui 9.x
 - Reqwest 0.13.x with rustls
-- Firestore 0.48.x
-- JsonWebToken 10.x
+- Firestore 0.49.x
+- JsonWebToken 10.4.x
 
 ### Current Best-Practice Anchors
 
