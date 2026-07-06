@@ -31,6 +31,10 @@ fmt-check:
 lint:
     cargo clippy --locked --all-targets --all-features -- -D warnings
 
+# Quality assurance: format, lint, build, and test
+[group('qa')]
+qa: fmt lint build test
+
 [group('test')]
 test:
     cargo nextest run --locked

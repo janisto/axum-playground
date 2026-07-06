@@ -10,6 +10,7 @@ pub mod services;
 pub mod shutdown;
 pub mod state;
 pub mod telemetry;
+pub mod validation;
 
 pub use app::build_app;
 pub use app::build_app_with_routes;

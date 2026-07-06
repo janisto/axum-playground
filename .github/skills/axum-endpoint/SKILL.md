@@ -93,16 +93,15 @@ Decode request bodies through `decode_request_body(...)` so JSON and CBOR behavi
 ```rust
 use axum::body::Bytes;
 use serde::Deserialize;
-use validator::Validate;
 
 use crate::{
     http::codec::decode_request_body,
     problem::problem_response,
+    validation::valid_name,
 };
 
-#[derive(Debug, Deserialize, Validate, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct WidgetCreateBody {
-    #[validate(length(min = 1, max = 100))]
     pub name: String,
 }
 
@@ -112,7 +111,7 @@ pub async fn create_widget_handler(headers: HeaderMap, body: Bytes) -> Response 
         Err(error) => return error.into_response(&headers),
     };
 
-    if input.validate().is_err() {
+    if !valid_name(&input.name) {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",

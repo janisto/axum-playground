@@ -9,12 +9,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use validator::Validate;
 
 use crate::{
     http::codec::{decode_request_body, success_response},
     problem::problem_response,
     state::AppState,
+    validation::valid_name,
 };
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -22,9 +22,8 @@ pub struct HelloData {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Validate)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct HelloCreateBody {
-    #[validate(length(min = 1, max = 100))]
     pub name: String,
 }
 
@@ -72,7 +71,7 @@ pub async fn create_hello_handler(headers: HeaderMap, body: Bytes) -> Response {
         Err(error) => return error.into_response(&headers),
     };
 
-    if input.validate().is_err() {
+    if !valid_name(&input.name) {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",
