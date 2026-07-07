@@ -53,7 +53,7 @@ Axum Playground is a Rust 2024 application built with Axum 0.8.x and Tokio. It p
 
 ### Current Stack
 
-- Rust 1.95, edition 2024
+- Rust 1.96.1, edition 2024
 - Axum 0.8.9
 - Tokio 1.52.3
 - Tower 0.5.x and tower-http 0.7.x
@@ -82,9 +82,13 @@ Key recipes:
 
 - `just build` - build the application
 - `just run` - run the local server
+- `just install` - alias for `just download`
+- `just download` - fetch locked Cargo dependencies
+- `just update` - update dependencies recorded in `Cargo.lock` within `Cargo.toml` constraints
 - `just fmt` - apply formatting
 - `just fmt-check` - verify formatting
 - `just lint` - run clippy with warnings denied
+- `just qa` - run format, lint, build, and tests
 - `just test` - run the main suite with `cargo nextest`
 - `just test-doc` - run doctests
 - `just test-emulators` - run Firestore emulator tests when the emulator is configured
@@ -95,6 +99,7 @@ Key recipes:
 - `just deny` - run dependency policy checks
 - `just audit` - run dependency vulnerability checks
 - `just docker-build` - build the image, preferring Podman and falling back to Docker
+- `just lock` - regenerate `Cargo.lock`
 
 Use `just` for standard repo workflows. For focused validation when there is no precise Justfile target, targeted `cargo test --locked --test ...` commands are acceptable only when the dependency graph is expected to stay unchanged.
 

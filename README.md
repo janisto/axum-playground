@@ -104,7 +104,7 @@ Notes:
 
 ### Requirements
 
-- Rust 1.95.x via `rust-toolchain.toml`
+- Rust 1.96.1 via `rust-toolchain.toml`
 - [Just](https://github.com/casey/just)
 - `cargo-nextest`
 - `cargo-llvm-cov`
@@ -185,9 +185,13 @@ functions/          # Placeholder directory for future Firebase functions
 | --- | --- |
 | `just build` | Build the application |
 | `just run` | Run the server |
+| `just install` | Alias for `just download` |
+| `just download` | Fetch locked Cargo dependencies |
+| `just update` | Update dependencies recorded in `Cargo.lock` within `Cargo.toml` constraints |
 | `just fmt` | Apply formatting |
 | `just fmt-check` | Verify formatting |
 | `just lint` | Run clippy with warnings denied |
+| `just qa` | Run format, lint, build, and tests |
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
 | `just test-emulators` | Run the Firestore emulator test when configured |
@@ -198,6 +202,7 @@ functions/          # Placeholder directory for future Firebase functions
 | `just deny` | Run dependency policy checks |
 | `just audit` | Run dependency vulnerability checks |
 | `just docker-build` | Build the development image with Podman first, then Docker |
+| `just lock` | Regenerate `Cargo.lock` |
 
 Run `just --list` to see all available recipes.
 
