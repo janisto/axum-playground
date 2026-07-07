@@ -9,7 +9,7 @@
 # centered around Google buildpack base images, which is not the default path for
 # this Rust service.
 
-ARG RUST_IMAGE=rust:1.95.0-bookworm
+ARG RUST_IMAGE=rust:1.96.1-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 ARG VERSION=dev
 

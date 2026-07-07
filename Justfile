@@ -19,6 +19,16 @@ docker-build:
 run:
     cargo run --locked
 
+alias install := download
+
+[group('lifecycle')]
+download:
+    cargo fetch --locked
+
+[group('lifecycle')]
+update:
+    cargo update
+
 [group('qa')]
 fmt:
     cargo fmt --all
