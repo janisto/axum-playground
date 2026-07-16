@@ -157,9 +157,14 @@ src/
 	lib.rs            # Reusable app construction
 	main.rs           # Thin startup entrypoint
 tests/              # In-process integration tests
-.github/            # Workflows, agents, and skills
+.agents/skills/     # Five portable coding-agent workflows with Codex metadata
+.github/agents/     # GitHub Copilot custom-agent profiles
+.github/workflows/  # GitHub Actions automation
 functions/          # Placeholder directory for future Firebase functions
 ```
+
+Portable repository skills follow the [Agent Skills specification](https://agentskills.io/specification) under
+`.agents/skills/`. See [AGENTS.md](AGENTS.md) for coding-agent execution rules and the current skill catalog.
 
 ### Routes
 

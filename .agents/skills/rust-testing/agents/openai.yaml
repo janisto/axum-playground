@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Testing"
+  short_description: "Write focused Axum and Rust tests"
+  default_prompt: "Use $rust-testing to add focused Rust tests with the repository fixtures and commands."
