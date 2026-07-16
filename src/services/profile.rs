@@ -248,15 +248,17 @@ impl FirestoreProfileStore {
             .await
         {
             Ok(created) => {
-                info!(
-                    operation = "profile.create",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.create", "profile mutation succeeded");
                 Ok(created)
             }
             Err(error) => {
-                warn!(operation = "profile.create", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Create))
+                let error = map_firestore_error(error, ProfileMutation::Create);
+                warn!(
+                    operation = "profile.create",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
@@ -309,15 +311,17 @@ impl FirestoreProfileStore {
             .await
         {
             Ok(updated) => {
-                info!(
-                    operation = "profile.update",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.update", "profile mutation succeeded");
                 Ok(updated)
             }
             Err(error) => {
-                warn!(operation = "profile.update", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Update))
+                let error = map_firestore_error(error, ProfileMutation::Update);
+                warn!(
+                    operation = "profile.update",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
@@ -335,15 +339,17 @@ impl FirestoreProfileStore {
             .await
         {
             Ok(_) => {
-                info!(
-                    operation = "profile.delete",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.delete", "profile mutation succeeded");
                 Ok(())
             }
             Err(error) => {
-                warn!(operation = "profile.delete", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Delete))
+                let error = map_firestore_error(error, ProfileMutation::Delete);
+                warn!(
+                    operation = "profile.delete",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
@@ -356,6 +362,14 @@ impl FirestoreProfileStore {
                     .map_err(|error| ProfileServiceError::Backend(error.to_string()))
             })
             .await
+    }
+}
+
+fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
+    match error {
+        ProfileServiceError::NotFound => "not_found",
+        ProfileServiceError::AlreadyExists => "already_exists",
+        ProfileServiceError::Backend(_) => "backend",
     }
 }
 

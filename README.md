@@ -5,7 +5,7 @@
 [![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![MIT license](https://img.shields.io/github/license/janisto/axum-playground)](LICENSE)
 
-A REST API skeleton built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just).
+A public REST API example built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just). It is intentionally not deployed yet; the repository is the example and validation target.
 
 It showcases tracing-based request logging, RFC 9457 Problem Details for errors, JSON/CBOR content negotiation, and a modular route layout that is ready to grow into a larger service.
 
@@ -17,10 +17,12 @@ It showcases tracing-based request logging, RFC 9457 Problem Details for errors,
 
 - Layered middleware architecture with security headers, CORS, request IDs, panic recovery, timeouts, and tracing-based access logging
 - Request-scoped trace correlation via `traceparent`, falling back to the request ID when no Google trace context is present
-- RFC 9457-style Problem Details for error responses with JSON and CBOR variants
-- Content negotiation supporting JSON and CBOR on versioned success responses via the `Accept` header
+- RFC 9457 Problem Details for JSON errors and the same data model encoded as generic CBOR
+- Strict JSON/CBOR negotiation on versioned responses, including `406 Not Acceptable` and exact media-range precedence
+- Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
 - Cursor-based pagination with RFC 8288 `Link` headers on items and GitHub activity endpoints
-- OpenAPI 3.1 documentation at `/v1/openapi` with Swagger UI at `/api-docs`
+- OpenAPI 3.1 documentation at `/v1/openapi`, including JSON/CBOR request and response media types plus bearer auth, with Swagger UI at `/api-docs`
+- A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedBy` links
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
 - Firestore-backed profile persistence with normalization and audit logging
 - Health check endpoint at `/health`
@@ -44,10 +46,12 @@ It showcases tracing-based request logging, RFC 9457 Problem Details for errors,
 
 #### Error Responses
 
-Errors follow RFC 9457-style Problem Details and honor content negotiation:
+Errors use the RFC 9457 Problem Details data model and honor content negotiation:
 
 - `application/problem+json` when JSON is requested or selected by default
-- `application/problem+cbor` when CBOR is requested
+- `application/cbor` when CBOR is explicitly preferred
+
+`application/problem+cbor` is not a registered media type. The registered `application/concise-problem-details+cbor` type defines a different compact model and is not implemented here.
 
 | Status | Use Case |
 | --- | --- |
@@ -55,16 +59,24 @@ Errors follow RFC 9457-style Problem Details and honor content negotiation:
 | 401 Unauthorized | Missing or invalid authentication |
 | 403 Forbidden | Authenticated but not authorized, or upstream access denied |
 | 404 Not Found | Resource does not exist |
+| 406 Not Acceptable | No supported success representation is acceptable |
 | 409 Conflict | Profile already exists |
+| 413 Content Too Large | Request body exceeds the 1 MiB limit |
+| 415 Unsupported Media Type | Request body is not owned JSON or CBOR |
 | 422 Unprocessable Entity | Validation failures on well-formed input |
 | 502 Bad Gateway | Upstream dependency failure |
 
 #### Content Negotiation
 
-- Default: `application/json`
-- Alternate: `application/cbor`
-- Problem responses switch to `application/problem+json` or `application/problem+cbor`
+- JSON is the default and wins equal-quality ties.
+- CBOR is selected only by an explicit positive-quality `application/cbor` media range; wildcards do not silently opt clients into binary responses.
+- Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
+- Request bodies must declare `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, and a CBOR body must contain exactly one data item.
+- Problems use `application/problem+json` by default and `application/cbor` when CBOR is explicitly preferred. Error negotiation is best effort so an existing error is not replaced by a second 406.
+- Bodyless 204 responses ignore `Accept`.
 - `/health` remains JSON-only
+
+See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949), [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457), and the [IANA media type registry](https://www.iana.org/assignments/media-types/media-types.xhtml) for the underlying contracts. Deterministic CBOR is intentionally not required because these payloads are transport representations, not signature or hash inputs.
 
 #### Pagination
 
@@ -88,7 +100,7 @@ cp .env.example .env
 | --- | --- | --- |
 | `PORT` | Server listen port | `8080` |
 | `FIREBASE_PROJECT_ID` | Firebase project ID and fallback Google project anchor | `demo-test-project` |
-| `APP_ENVIRONMENT` | Environment label used by tracing setup | `development` |
+| `APP_ENVIRONMENT` | Environment label used by tracing and local-emulator guardrails | `development` |
 | `GITHUB_TOKEN` | Optional token for higher-rate GitHub API access | - |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
 | `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
@@ -100,10 +112,11 @@ cp .env.example .env
 
 Notes:
 
-- Emulator hosts must omit the protocol prefix, for example `127.0.0.1:9099` and `127.0.0.1:8080`.
+- Emulator hosts must omit the protocol prefix and use loopback, for example `127.0.0.1:9099` and `127.0.0.1:8080`. Emulator configuration is rejected outside `development` and `test`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
-- `GOOGLE_APPLICATION_CREDENTIALS` and `FIRESTORE_EMULATOR_HOST` are intentionally kept in the Rust config surface for future explicit wiring, even though the current runtime mainly relies on ADC behavior and emulator-specific test helpers.
+- Runtime state always constructs real HTTP, authentication, and persistence services. Tests compose explicit doubles; setting `APP_ENVIRONMENT=test` does not activate mock services.
+- `GITHUB_TOKEN` and the credentials path are redacted from `AppConfig` debug output.
 
 ## Local Development
 
@@ -120,9 +133,13 @@ Notes:
 
 ### Quick Start
 
+Choose either Application Default Credentials or the local Firebase emulators before starting. For local exploration of the public unauthenticated routes, the Auth emulator configuration keeps startup local:
+
 ```bash
-just run
+FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 just run
 ```
+
+The emulator does not need to be running until an authenticated profile request is made. To exercise profile persistence, start both Firebase emulators as described below.
 
 Then visit:
 
@@ -146,10 +163,14 @@ src/
 	error.rs          # Startup and application error types
 	http/
 		health.rs       # Root health endpoint
+		codec.rs        # Shared body decoding and response encoding
+		extract.rs      # Problem Details-aware path and query extractors
+		negotiation.rs  # RFC 9110 JSON/CBOR selection
+		schema.rs       # Standalone Problem Details JSON Schema
 		v1/             # Versioned API routes and docs wiring
 	middleware/       # Cross-cutting HTTP middleware
 	pagination/       # Cursor and RFC 8288 link helpers
-	problem/          # Problem Details responses and negotiation
+	problem/          # Problem Details model and response construction
 	services/         # GitHub and profile service implementations
 	shutdown.rs       # Graceful shutdown coordination
 	state.rs          # Shared application state
@@ -173,6 +194,7 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | GET | `/health` | Health check route |
 | GET | `/api-docs` | Swagger UI |
 | GET | `/v1/openapi` | OpenAPI document |
+| GET | `/schemas/ErrorModel.json` | Problem Details JSON Schema |
 | GET | `/v1/hello` | Default greeting |
 | POST | `/v1/hello` | Create a personalized greeting |
 | GET | `/v1/items` | List items with cursor-based pagination |
@@ -226,9 +248,11 @@ export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 just test-emulators
 ```
 
-The emulator test skips cleanly when `FIRESTORE_EMULATOR_HOST` is unset.
+The emulator test skips cleanly when `FIRESTORE_EMULATOR_HOST` is unset. GitHub Actions does not currently start Firebase emulators, so emulator-backed Firestore coverage is an explicit local gate rather than part of the hosted CI claim.
 
-## Deployment
+## Future Deployment
+
+No environment has been deployed or validated from this repository. The following files document the intended Cloud Run path for future use; they are not evidence of production readiness.
 
 ### Container
 
@@ -258,13 +282,15 @@ gcloud builds submit --config cloudbuild.yaml \
 	--substitutions _REGION=europe-west4,_AR_REPOSITORY=app-images,_IMAGE_NAME=axum-playground,_SERVICE=axum-playground,_DEPLOY=true
 ```
 
-The committed `cloudbuild.yaml` builds and pushes both `${SHORT_SHA}` and `latest` tags. When `_DEPLOY=true`, it deploys the `${SHORT_SHA}` image to Cloud Run in the configured region.
+The committed `cloudbuild.yaml` is configured to build and push both `${SHORT_SHA}` and `latest` tags. When `_DEPLOY=true`, it is intended to deploy the `${SHORT_SHA}` image to Cloud Run in the configured region.
 
 Production runtime expectations:
 
 - The service listens on `0.0.0.0:$PORT` and defaults to `8080` locally
 - Cloud Run terminates TLS before forwarding HTTP traffic to the container
 - Production credentials should come from the attached service identity rather than a local key file
+- Configure a restrictive CORS policy before public deployment; the current wildcard, non-credentialed policy is for local example access
+- Put Cloud Run or another front proxy in front of the Axum server to enforce connection-level limits in addition to the application request timeout
 
 ## QA Surface
 
@@ -272,8 +298,8 @@ Production runtime expectations:
 
 - In-process route behavior and JSON/CBOR negotiation across the public API
 - Problem details, request ID behavior, and 404 or 405 fallback behavior
-- Firebase auth parsing and emulator-mode flows
-- Firestore-backed profile CRUD via the conditional emulator integration test
+- Firebase auth parsing, revocation semantics, and local-only emulator guardrails
+- Firestore-backed profile CRUD via an optional local emulator integration test
 - Dependency policy and vulnerability checks through `just deny` and `just audit`
 - Coverage export through `just coverage-lcov` and `just coverage-html`
 - Container image buildability through `just docker-build`

@@ -61,7 +61,9 @@ Instructions for coding agents working in this repository.
 - Treat malformed syntax and cursor encoding as 400, validation failures as 422, missing or invalid authentication as 401, conflicts as 409, and controlled upstream failures according to the existing service mapping.
 - Keep public JSON fields camelCase, using Serde renames when Rust naming differs. Keep Firestore storage naming separate from the HTTP contract.
 - Document every public handler with `#[utoipa::path(...)]`. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
-- Preserve JSON as the default success representation and CBOR as the negotiated alternative on versioned endpoints. `/health` remains JSON-only. The current Problem Details implementation uses `application/problem+json` and the project-specific `application/problem+cbor`; do not silently document or implement a different format in an unrelated change.
+- Preserve JSON as the default success representation and explicit `application/cbor` as the negotiated alternative on versioned endpoints. JSON wins ties and wildcards; exact exclusions and RFC 9110 specificity remain authoritative. Unsupported modeled success representations return 406 before endpoint work. `/health` remains JSON-only, and bodyless 204 responses ignore `Accept`.
+- Accept request bodies only as owned `application/json` or exact `application/cbor`; do not claim arbitrary `+cbor` media types. Return Problem Details with 415 for unsupported media types, 400 for malformed JSON/CBOR, and 413 for the shared 1 MiB limit. A CBOR request must contain exactly one data item.
+- Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.
 - Preserve `Vary: Origin, Accept` on application-owned responses and include contract headers such as `Location` and `Link` through shared helpers.
 - Respect a valid incoming `X-Request-Id`, generate a UUIDv4 fallback when it is absent or invalid, and keep request correlation behavior centralized in middleware.
 
@@ -78,6 +80,7 @@ Instructions for coding agents working in this repository.
 - Preserve production Firebase verification: RS256 Google keys, issuer and audience checks, Identity Platform lookup, and disabled or revoked-user handling. Preserve the explicit emulator path when `FIREBASE_AUTH_EMULATOR_HOST` is configured.
 - Use mock services for deterministic tests and the Firestore-backed profile service only when persistence semantics are under test. Preserve create-if-absent, ownership, audit, and timestamp behavior in the service layer.
 - Keep runtime configuration in environment variables and `AppConfig`. Never commit or log credentials, tokens, service-account paths, authorization values, profile data, or other PII. Prefer Application Default Credentials and workload identity in deployed environments.
+- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments.
 - Keep request logs and trace correlation in the existing tracing middleware. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 

@@ -6,6 +6,11 @@ pub enum StartupError {
     InvalidPort(String),
     #[error("failed to initialize authentication: {0}")]
     AuthInitialization(String),
+    #[error("unsafe emulator configuration for {variable}: {host}")]
+    UnsafeEmulatorHost {
+        variable: &'static str,
+        host: String,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to initialize tracing: {0}")]

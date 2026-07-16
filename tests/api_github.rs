@@ -300,6 +300,41 @@ async fn github_activity_uses_link_header_and_validates_cursor() {
 }
 
 #[tokio::test]
+async fn github_rejects_invalid_paths_and_query_syntax_before_service_calls() {
+    let rejecting_service = || {
+        GitHubService::mock(MockGitHubService::demo().with_error(GitHubServiceError::RateLimited))
+    };
+
+    for uri in [
+        "/v1/github/owners/-invalid",
+        "/v1/github/repos/octocat/invalid%20repo",
+        "/v1/github/repos/octocat/git-consortium/activity?limit=not-a-number",
+    ] {
+        let response = build_app(test_state_with_github_service(rejecting_service()))
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/problem+json")
+        );
+        let problem: ProblemDetails = read_json_body(response).await;
+        assert_eq!(problem.status, StatusCode::BAD_REQUEST.as_u16());
+    }
+}
+
+#[tokio::test]
 async fn github_error_mapping_covers_not_found_forbidden_rate_limit_and_upstream() {
     let not_found = build_app(test_state_with_github_service(GitHubService::mock(
         MockGitHubService::demo().with_error(GitHubServiceError::NotFound),
@@ -401,5 +436,6 @@ async fn openapi_includes_github_paths() {
     let body = read_text_body(response).await;
     assert!(body.contains("\"/v1/github/owners/{owner}\""));
     assert!(body.contains("\"/v1/github/repos/{owner}/{repo}/tags\""));
-    assert!(body.contains("Query validation failure"));
+    assert!(body.contains("application/problem+json"));
+    assert!(body.contains("application/cbor"));
 }

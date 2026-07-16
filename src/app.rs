@@ -2,16 +2,13 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::Request,
+    extract::{DefaultBodyLimit, Request},
     http::{HeaderName, Method, StatusCode, header},
     middleware::{from_fn, from_fn_with_state},
     response::Response,
 };
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    limit::RequestBodyLimitLayer,
-};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     http::{health, v1},
@@ -61,6 +58,10 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
 
     Router::new()
         .route("/health", axum::routing::get(health::health_handler))
+        .route(
+            "/schemas/ErrorModel.json",
+            axum::routing::get(crate::http::schema::error_model_schema_handler),
+        )
         .merge(v1::docs::ui_router())
         .nest("/v1", v1::router())
         .merge(extra_routes)
@@ -77,7 +78,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
                 .layer(from_fn(security_headers_middleware))
                 .layer(cors_layer)
                 .layer(from_fn(timeout_middleware))
-                .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE_BYTES)),
+                .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_SIZE_BYTES)),
         )
         .with_state(state)
 }

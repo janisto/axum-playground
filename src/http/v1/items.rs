@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::Query,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
@@ -11,9 +10,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    http::codec::success_response_with_headers,
+    http::{
+        codec::{ResponseFormat, success_response_with_headers},
+        extract::ProblemQuery,
+    },
     pagination::{cursor::decode_cursor, paginate},
-    problem::problem_response,
+    problem::{ProblemResponse, problem_response},
     state::AppState,
 };
 
@@ -73,13 +75,15 @@ pub fn router() -> Router<Arc<AppState>> {
             (ItemsListData = "application/json"),
             (ItemsListData = "application/cbor")
         )),
-        (status = 400, description = "Cursor validation failure"),
-        (status = 422, description = "Query validation failure")
+        (status = 400, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse)
     )
 )]
 pub async fn list_items_handler(
+    format: ResponseFormat,
     headers: HeaderMap,
-    Query(query): Query<ItemsListQuery>,
+    ProblemQuery(query): ProblemQuery<ItemsListQuery>,
 ) -> Response {
     if let Some(limit) = query.limit
         && (limit <= 0 || limit > MAX_LIMIT)
@@ -155,7 +159,7 @@ pub async fn list_items_handler(
 
     success_response_with_headers(
         StatusCode::OK,
-        &headers,
+        format,
         &ItemsListData {
             items: page.items,
             total: page.total,

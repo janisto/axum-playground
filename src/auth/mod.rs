@@ -174,7 +174,13 @@ impl AuthVerifier {
     pub fn from_config(config: &AppConfig) -> Result<Self, StartupError> {
         let project_id = config.firebase_project_id.clone();
 
-        if config.firebase_auth_emulator_host.is_some() {
+        if let Some(host) = config.firebase_auth_emulator_host.as_deref() {
+            if !config.emulator_host_is_loopback(host) {
+                return Err(StartupError::UnsafeEmulatorHost {
+                    variable: "FIREBASE_AUTH_EMULATOR_HOST",
+                    host: host.to_string(),
+                });
+            }
             return Ok(Self {
                 inner: Arc::new(AuthVerifierInner::Emulator(Box::new(
                     EmulatorAuthVerifier { project_id },
@@ -270,9 +276,7 @@ impl ProductionAuthVerifier {
             return Err(AuthError::UserDisabled);
         }
 
-        if let (Some(valid_since), Some(issued_at)) = (lookup.valid_since_epoch(), claims.iat)
-            && issued_at < valid_since
-        {
+        if token_is_revoked(lookup.valid_since_epoch(), claims.auth_time) {
             return Err(AuthError::TokenRevoked);
         }
 
@@ -517,6 +521,10 @@ fn unix_timestamp_now() -> u64 {
         .as_secs()
 }
 
+fn token_is_revoked(valid_since: Option<u64>, auth_time: Option<u64>) -> bool {
+    matches!((valid_since, auth_time), (Some(valid_since), Some(auth_time)) if auth_time < valid_since)
+}
+
 fn map_jwt_error(error: JwtError) -> AuthError {
     match error.kind() {
         JwtErrorKind::ExpiredSignature => AuthError::TokenExpired,
@@ -599,8 +607,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthError, EmulatorAuthVerifier, FirebaseUser, expected_issuer, extract_bearer_token,
+        AuthError, AuthVerifier, EmulatorAuthVerifier, FirebaseUser, expected_issuer,
+        extract_bearer_token, token_is_revoked,
     };
+    use crate::{config::AppConfig, error::StartupError};
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
@@ -628,6 +638,33 @@ mod tests {
             extract_bearer_token("Bearer token extra"),
             Err(AuthError::InvalidAuthorization)
         );
+    }
+
+    #[test]
+    fn auth_emulator_requires_a_local_environment_and_loopback_host() {
+        let mut config = test_config();
+        config.firebase_auth_emulator_host = Some("emulator.example.com:9099".to_string());
+        assert!(matches!(
+            AuthVerifier::from_config(&config),
+            Err(StartupError::UnsafeEmulatorHost { .. })
+        ));
+
+        config.firebase_auth_emulator_host = Some("127.0.0.1:9099".to_string());
+        config.app_environment = "production".to_string();
+        assert!(matches!(
+            AuthVerifier::from_config(&config),
+            Err(StartupError::UnsafeEmulatorHost { .. })
+        ));
+
+        config.app_environment = "development".to_string();
+        assert!(AuthVerifier::from_config(&config).is_ok());
+    }
+
+    #[test]
+    fn revocation_uses_auth_time_instead_of_token_issue_time() {
+        assert!(token_is_revoked(Some(200), Some(100)));
+        assert!(!token_is_revoked(Some(200), Some(200)));
+        assert!(!token_is_revoked(Some(200), None));
     }
 
     #[tokio::test]
@@ -696,5 +733,21 @@ mod tests {
         let claims = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("claims should serialize to JSON"));
         format!("{header}.{claims}.")
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            port: 8080,
+            firebase_project_id: "demo-test-project".to_string(),
+            app_environment: "development".to_string(),
+            github_token: None,
+            google_application_credentials: None,
+            firebase_auth_emulator_host: None,
+            firestore_emulator_host: None,
+            google_cloud_project: None,
+            gcp_project: None,
+            gcloud_project: None,
+            project_id: None,
+        }
     }
 }

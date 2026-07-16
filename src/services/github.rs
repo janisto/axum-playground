@@ -413,7 +413,7 @@ impl MockGitHubService {
 impl HttpGitHubService {
     async fn get_owner(&self, owner: &str) -> Result<Owner, GitHubServiceError> {
         let payload: GitHubOwnerPayload = self
-            .send_json(self.client.get(self.url(&format!("/users/{owner}"))))
+            .send_json(self.client.get(self.url(&["users", owner])))
             .await?;
         Ok(payload.into_owner())
     }
@@ -422,7 +422,7 @@ impl HttpGitHubService {
         let payload: Vec<GitHubRepoSummaryPayload> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/users/{owner}/repos")))
+                    .get(self.url(&["users", owner, "repos"]))
                     .query(&[("per_page", LIST_LIMIT)]),
             )
             .await?;
@@ -434,7 +434,7 @@ impl HttpGitHubService {
 
     async fn get_repo(&self, owner: &str, repo: &str) -> Result<Repo, GitHubServiceError> {
         let payload: GitHubRepoPayload = self
-            .send_json(self.client.get(self.url(&format!("/repos/{owner}/{repo}"))))
+            .send_json(self.client.get(self.url(&["repos", owner, repo])))
             .await?;
         Ok(payload.into_repo())
     }
@@ -448,7 +448,7 @@ impl HttpGitHubService {
     ) -> Result<ActivityPage, GitHubServiceError> {
         let mut request = self
             .client
-            .get(self.url(&format!("/repos/{owner}/{repo}/activity")))
+            .get(self.url(&["repos", owner, repo, "activity"]))
             .query(&[("per_page", limit)]);
         if !after_cursor.is_empty() {
             request = request.query(&[("after", after_cursor)]);
@@ -482,7 +482,7 @@ impl HttpGitHubService {
         let payload: BTreeMap<String, i64> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/repos/{owner}/{repo}/languages"))),
+                    .get(self.url(&["repos", owner, repo, "languages"])),
             )
             .await?;
 
@@ -503,7 +503,7 @@ impl HttpGitHubService {
         let payload: Vec<GitHubTagPayload> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/repos/{owner}/{repo}/tags")))
+                    .get(self.url(&["repos", owner, repo, "tags"]))
                     .query(&[("per_page", LIST_LIMIT)]),
             )
             .await?;
@@ -551,8 +551,14 @@ impl HttpGitHubService {
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    fn url(&self, segments: &[&str]) -> reqwest::Url {
+        let mut url =
+            reqwest::Url::parse(&self.base_url).expect("GitHub base URL should be an absolute URL");
+        url.path_segments_mut()
+            .expect("GitHub base URL should support path segments")
+            .pop_if_empty()
+            .extend(segments);
+        url
     }
 }
 
@@ -785,7 +791,10 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
-    use super::{GITHUB_ACCEPT, GitHubService, GitHubServiceError, GitHubUpstreamErrorKind};
+    use super::{
+        GITHUB_ACCEPT, GitHubService, GitHubServiceError, GitHubServiceInner,
+        GitHubUpstreamErrorKind,
+    };
 
     async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -797,6 +806,19 @@ mod tests {
         });
 
         (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn http_service_encodes_untrusted_path_segments() {
+        let service = GitHubService::http_with_base_url("https://api.github.test", None);
+        let GitHubServiceInner::Http(service) = service.inner.as_ref() else {
+            panic!("expected HTTP service");
+        };
+
+        assert_eq!(
+            service.url(&["repos", "owner", "repo/name"]).as_str(),
+            "https://api.github.test/repos/owner/repo%2Fname"
+        );
     }
 
     #[tokio::test]

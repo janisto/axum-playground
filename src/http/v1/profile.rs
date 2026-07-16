@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    body::Bytes,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
@@ -13,9 +12,10 @@ use utoipa::ToSchema;
 use crate::{
     auth::AuthenticatedUser,
     http::codec::{
-        decode_request_body, no_content_response, success_response, success_response_with_headers,
+        BufferedBody, ResponseFormat, decode_request_body, no_content_response, success_response,
+        success_response_with_headers,
     },
-    problem::problem_response,
+    problem::{ProblemResponse, problem_response},
     services::profile::{CreateProfileParams, Profile, ProfileServiceError, UpdateProfileParams},
     state::AppState,
     validation::{valid_email, valid_name, valid_phone_number},
@@ -57,19 +57,29 @@ pub fn router() -> Router<Arc<AppState>> {
     post,
     path = "/v1/profile",
     tag = "Profile",
-    request_body = CreateProfileBody,
+    security(("bearerAuth" = [])),
+    request_body(content(
+        (CreateProfileBody = "application/json"),
+        (CreateProfileBody = "application/cbor")
+    )),
     responses(
         (status = 201, description = "Created profile", headers(("Location" = String, description = "Canonical profile resource")), content((Profile = "application/json"), (Profile = "application/cbor"))),
-        (status = 401, description = "Authentication failure"),
-        (status = 409, description = "Profile already exists"),
-        (status = 422, description = "Validation failure")
+        (status = 400, response = ProblemResponse),
+        (status = 401, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 409, response = ProblemResponse),
+        (status = 413, response = ProblemResponse),
+        (status = 415, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
+        (status = 500, response = ProblemResponse)
     )
 )]
 pub async fn create_profile_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
     user: AuthenticatedUser,
-    body: Bytes,
+    BufferedBody(body): BufferedBody,
 ) -> Response {
     let input = match decode_request_body::<CreateProfileBody>(&headers, body) {
         Ok(input) => input,
@@ -90,7 +100,7 @@ pub async fn create_profile_handler(
     match state.profile_service.create(&user.0.uid, params).await {
         Ok(profile) => success_response_with_headers(
             StatusCode::CREATED,
-            &headers,
+            format,
             &profile,
             [(header::LOCATION, HeaderValue::from_static("/v1/profile"))],
         ),
@@ -102,19 +112,23 @@ pub async fn create_profile_handler(
     get,
     path = "/v1/profile",
     tag = "Profile",
+    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Current profile", content((Profile = "application/json"), (Profile = "application/cbor"))),
-        (status = 401, description = "Authentication failure"),
-        (status = 404, description = "Profile not found")
+        (status = 401, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 500, response = ProblemResponse)
     )
 )]
 pub async fn get_profile_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
     user: AuthenticatedUser,
 ) -> Response {
     match state.profile_service.get(&user.0.uid).await {
-        Ok(profile) => success_response(StatusCode::OK, &headers, &profile),
+        Ok(profile) => success_response(StatusCode::OK, format, &profile),
         Err(error) => map_service_error(&headers, error),
     }
 }
@@ -123,19 +137,29 @@ pub async fn get_profile_handler(
     patch,
     path = "/v1/profile",
     tag = "Profile",
-    request_body = UpdateProfileBody,
+    security(("bearerAuth" = [])),
+    request_body(content(
+        (UpdateProfileBody = "application/json"),
+        (UpdateProfileBody = "application/cbor")
+    )),
     responses(
         (status = 200, description = "Updated profile", content((Profile = "application/json"), (Profile = "application/cbor"))),
-        (status = 401, description = "Authentication failure"),
-        (status = 404, description = "Profile not found"),
-        (status = 422, description = "Validation failure")
+        (status = 400, response = ProblemResponse),
+        (status = 401, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 413, response = ProblemResponse),
+        (status = 415, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
+        (status = 500, response = ProblemResponse)
     )
 )]
 pub async fn update_profile_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
     user: AuthenticatedUser,
-    body: Bytes,
+    BufferedBody(body): BufferedBody,
 ) -> Response {
     let input = match decode_request_body::<UpdateProfileBody>(&headers, body) {
         Ok(input) => input,
@@ -154,7 +178,7 @@ pub async fn update_profile_handler(
     };
 
     match state.profile_service.update(&user.0.uid, params).await {
-        Ok(profile) => success_response(StatusCode::OK, &headers, &profile),
+        Ok(profile) => success_response(StatusCode::OK, format, &profile),
         Err(error) => map_service_error(&headers, error),
     }
 }
@@ -163,10 +187,12 @@ pub async fn update_profile_handler(
     delete,
     path = "/v1/profile",
     tag = "Profile",
+    security(("bearerAuth" = [])),
     responses(
         (status = 204, description = "Deleted profile"),
-        (status = 401, description = "Authentication failure"),
-        (status = 404, description = "Profile not found")
+        (status = 401, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 500, response = ProblemResponse)
     )
 )]
 pub async fn delete_profile_handler(
@@ -175,7 +201,7 @@ pub async fn delete_profile_handler(
     user: AuthenticatedUser,
 ) -> Response {
     match state.profile_service.delete(&user.0.uid).await {
-        Ok(()) => no_content_response(&headers, std::iter::empty()),
+        Ok(()) => no_content_response(std::iter::empty()),
         Err(error) => map_service_error(&headers, error),
     }
 }

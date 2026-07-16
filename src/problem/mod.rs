@@ -1,5 +1,3 @@
-pub mod negotiate;
-
 use std::collections::BTreeSet;
 
 use axum::{
@@ -8,18 +6,19 @@ use axum::{
     response::Response,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{ToResponse, ToSchema};
 
-use crate::problem::negotiate::select_format;
+use crate::http::negotiation::{
+    CBOR_MEDIA_TYPE, PROBLEM_JSON_MEDIA_TYPE, Representation, negotiate_problem_representation,
+};
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
 pub struct ProblemFieldError {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
 pub struct ProblemDetails {
-    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,10 +32,16 @@ pub struct ProblemDetails {
     pub errors: Option<Vec<ProblemFieldError>>,
 }
 
+#[derive(ToResponse)]
+#[response(description = "Problem Details error")]
+pub enum ProblemResponse {
+    Json(#[content("application/problem+json")] ProblemDetails),
+    Cbor(#[content("application/cbor")] ProblemDetails),
+}
+
 impl ProblemDetails {
     pub fn new(status: u16, title: impl Into<String>) -> Self {
         Self {
-            schema: None,
             r#type: None,
             title: Some(title.into()),
             status,
@@ -51,38 +56,32 @@ impl ProblemDetails {
         self
     }
 
-    pub fn into_response(&self, request_headers: &HeaderMap, scheme: &str, host: &str) -> Response {
+    pub fn into_response(&self, request_headers: &HeaderMap) -> Response {
         let mut response_problem = self.clone();
-        response_problem.schema = Some(format!("{scheme}://{host}/schemas/ErrorModel.json"));
-
-        let prefers_cbor = select_format(
-            request_headers
-                .get(header::ACCEPT)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default(),
-        );
-
         let status = StatusCode::from_u16(response_problem.status)
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         response_problem.status = status.as_u16();
 
-        let mut response = if prefers_cbor {
-            let mut body = Vec::new();
-            ciborium::into_writer(&response_problem, &mut body)
-                .expect("serializing problem details to CBOR should succeed");
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, "application/problem+cbor")
-                .body(Body::from(body))
-                .expect("response should build")
-        } else {
-            let body = serde_json::to_vec(&response_problem)
-                .expect("serializing problem details to JSON should succeed");
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, "application/problem+json")
-                .body(Body::from(body))
-                .expect("response should build")
+        let mut response = match negotiate_problem_representation(request_headers) {
+            Representation::Cbor => {
+                let mut body = Vec::new();
+                ciborium::into_writer(&response_problem, &mut body)
+                    .expect("serializing problem details to CBOR should succeed");
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, CBOR_MEDIA_TYPE)
+                    .body(Body::from(body))
+                    .expect("response should build")
+            }
+            Representation::Json => {
+                let body = serde_json::to_vec(&response_problem)
+                    .expect("serializing problem details to JSON should succeed");
+                Response::builder()
+                    .status(status)
+                    .header(header::CONTENT_TYPE, PROBLEM_JSON_MEDIA_TYPE)
+                    .body(Body::from(body))
+                    .expect("response should build")
+            }
         };
 
         ensure_vary(response.headers_mut(), ["Origin", "Accept"]);
@@ -104,30 +103,7 @@ pub fn problem_response(
         status.canonical_reason().unwrap_or("Internal Server Error"),
     )
     .with_detail(detail)
-    .into_response(
-        request_headers,
-        &request_scheme(request_headers),
-        &request_host(request_headers),
-    )
-}
-
-pub fn request_scheme(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("http")
-        .to_string()
-}
-
-pub fn request_host(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("localhost")
-        .to_string()
+    .into_response(request_headers)
 }
 
 pub fn ensure_vary(headers: &mut HeaderMap, values: impl IntoIterator<Item = &'static str>) {
@@ -157,10 +133,9 @@ mod tests {
     use axum::{
         body::to_bytes,
         http::{HeaderMap, HeaderValue, StatusCode, header},
-        response::IntoResponse,
     };
 
-    use super::{ProblemDetails, ensure_vary, problem_response, request_host, request_scheme};
+    use super::{ProblemDetails, ensure_vary, problem_response};
 
     #[test]
     fn ensure_vary_merges_without_duplicates() {
@@ -179,30 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn request_metadata_prefers_forwarded_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        headers.insert(
-            "x-forwarded-host",
-            HeaderValue::from_static("api.example.com"),
-        );
-        headers.insert(
-            header::HOST,
-            HeaderValue::from_static("ignored.example.com"),
-        );
-
-        assert_eq!(request_scheme(&headers), "https");
-        assert_eq!(request_host(&headers), "api.example.com");
-    }
-
-    #[test]
-    fn problem_response_uses_request_metadata_defaults() {
+    fn problem_response_includes_relative_schema_link() {
         let response = problem_response(
             StatusCode::NOT_FOUND,
             "resource not found",
             &HeaderMap::new(),
-        )
-        .into_response();
+        );
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
@@ -216,9 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_problem_status_normalizes_body_and_http_status() {
-        let response = ProblemDetails::new(42, "invalid")
-            .into_response(&HeaderMap::new(), "http", "localhost")
-            .into_response();
+        let response = ProblemDetails::new(42, "invalid").into_response(&HeaderMap::new());
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 

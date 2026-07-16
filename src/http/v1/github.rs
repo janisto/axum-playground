@@ -2,21 +2,24 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use utoipa::ToSchema;
 
 use crate::{
-    http::codec::{success_response, success_response_with_headers},
+    http::{
+        codec::{ResponseFormat, success_response, success_response_with_headers},
+        extract::{ProblemPath, ProblemQuery},
+    },
     pagination::{
         cursor::{Cursor, decode_cursor},
         link::build_link_header,
     },
-    problem::problem_response,
+    problem::{ProblemResponse, problem_response},
     services::github::{
         Activity, GitHubServiceError, GitHubUpstreamErrorKind, Language, Owner, Repo, RepoSummary,
         Tag,
@@ -30,12 +33,15 @@ const MAX_LIMIT: i64 = 100;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct OwnerPath {
+    #[serde(deserialize_with = "deserialize_owner")]
     pub owner: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RepoPath {
+    #[serde(deserialize_with = "deserialize_owner")]
     pub owner: String,
+    #[serde(deserialize_with = "deserialize_repo")]
     pub repo: String,
 }
 
@@ -68,6 +74,38 @@ pub struct RepoTagsResponse {
     pub count: usize,
 }
 
+fn deserialize_owner<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let valid = !value.is_empty()
+        && value.len() <= 39
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-');
+    valid
+        .then_some(value)
+        .ok_or_else(|| D::Error::custom("invalid GitHub owner"))
+}
+
+fn deserialize_repo<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let valid = !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    valid
+        .then_some(value)
+        .ok_or_else(|| D::Error::custom("invalid GitHub repository"))
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/github/owners/{owner}", get(get_github_owner_handler))
@@ -97,19 +135,22 @@ pub fn router() -> Router<Arc<AppState>> {
     params(("owner" = String, Path, description = "GitHub username")),
     responses(
         (status = 200, description = "GitHub owner", content((Owner = "application/json"), (Owner = "application/cbor"))),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn get_github_owner_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<OwnerPath>,
+    ProblemPath(path): ProblemPath<OwnerPath>,
 ) -> Response {
     match state.github_service.get_owner(&path.owner).await {
-        Ok(owner) => success_response(StatusCode::OK, &headers, &owner),
+        Ok(owner) => success_response(StatusCode::OK, format, &owner),
         Err(error) => map_service_error(&headers, error),
     }
 }
@@ -121,21 +162,24 @@ pub async fn get_github_owner_handler(
     params(("owner" = String, Path, description = "GitHub username")),
     responses(
         (status = 200, description = "GitHub repositories", content((OwnerReposResponse = "application/json"), (OwnerReposResponse = "application/cbor"))),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn list_github_owner_repos_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<OwnerPath>,
+    ProblemPath(path): ProblemPath<OwnerPath>,
 ) -> Response {
     match state.github_service.list_repos(&path.owner).await {
         Ok(repos) => success_response(
             StatusCode::OK,
-            &headers,
+            format,
             &OwnerReposResponse {
                 count: repos.len(),
                 repos,
@@ -155,19 +199,22 @@ pub async fn list_github_owner_repos_handler(
     ),
     responses(
         (status = 200, description = "GitHub repository", content((Repo = "application/json"), (Repo = "application/cbor"))),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn get_github_repo_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<RepoPath>,
+    ProblemPath(path): ProblemPath<RepoPath>,
 ) -> Response {
     match state.github_service.get_repo(&path.owner, &path.repo).await {
-        Ok(repo) => success_response(StatusCode::OK, &headers, &repo),
+        Ok(repo) => success_response(StatusCode::OK, format, &repo),
         Err(error) => map_service_error(&headers, error),
     }
 }
@@ -184,19 +231,21 @@ pub async fn get_github_repo_handler(
     ),
     responses(
         (status = 200, description = "Repository activity", headers(("Link" = String, description = "RFC 8288 pagination links")), content((RepoActivityResponse = "application/json"), (RepoActivityResponse = "application/cbor"))),
-        (status = 400, description = "Cursor validation failure"),
-        (status = 422, description = "Query validation failure"),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn list_github_repo_activity_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<RepoPath>,
-    Query(query): Query<ActivityQuery>,
+    ProblemPath(path): ProblemPath<RepoPath>,
+    ProblemQuery(query): ProblemQuery<ActivityQuery>,
 ) -> Response {
     if let Some(limit) = query.limit
         && (limit <= 0 || limit > MAX_LIMIT)
@@ -249,7 +298,7 @@ pub async fn list_github_repo_activity_handler(
 
             success_response_with_headers(
                 StatusCode::OK,
-                &headers,
+                format,
                 &RepoActivityResponse {
                     count: page.activities.len(),
                     activities: page.activities,
@@ -271,27 +320,28 @@ pub async fn list_github_repo_activity_handler(
     ),
     responses(
         (status = 200, description = "Repository languages", content((RepoLanguagesResponse = "application/json"), (RepoLanguagesResponse = "application/cbor"))),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn get_github_repo_languages_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<RepoPath>,
+    ProblemPath(path): ProblemPath<RepoPath>,
 ) -> Response {
     match state
         .github_service
         .list_languages(&path.owner, &path.repo)
         .await
     {
-        Ok(languages) => success_response(
-            StatusCode::OK,
-            &headers,
-            &RepoLanguagesResponse { languages },
-        ),
+        Ok(languages) => {
+            success_response(StatusCode::OK, format, &RepoLanguagesResponse { languages })
+        }
         Err(error) => map_service_error(&headers, error),
     }
 }
@@ -306,16 +356,19 @@ pub async fn get_github_repo_languages_handler(
     ),
     responses(
         (status = 200, description = "Repository tags", content((RepoTagsResponse = "application/json"), (RepoTagsResponse = "application/cbor"))),
-        (status = 403, description = "Access denied"),
-        (status = 404, description = "Resource not found"),
-        (status = 429, description = "Rate limited"),
-        (status = 502, description = "Upstream error")
+        (status = 400, response = ProblemResponse),
+        (status = 403, response = ProblemResponse),
+        (status = 404, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 429, response = ProblemResponse),
+        (status = 502, response = ProblemResponse)
     )
 )]
 pub async fn list_github_repo_tags_handler(
     State(state): State<Arc<AppState>>,
+    format: ResponseFormat,
     headers: HeaderMap,
-    Path(path): Path<RepoPath>,
+    ProblemPath(path): ProblemPath<RepoPath>,
 ) -> Response {
     match state
         .github_service
@@ -324,7 +377,7 @@ pub async fn list_github_repo_tags_handler(
     {
         Ok(tags) => success_response(
             StatusCode::OK,
-            &headers,
+            format,
             &RepoTagsResponse {
                 count: tags.len(),
                 tags,

@@ -31,14 +31,18 @@ pub async fn read_text_body(response: Response<Body>) -> String {
 }
 
 pub fn test_state() -> Arc<AppState> {
-    Arc::new(AppState::new(base_test_config()).expect("test state should initialize"))
+    test_state_with_github_service(GitHubService::mock(
+        axum_playground::MockGitHubService::demo(),
+    ))
 }
 
 pub fn test_state_with_github_service(github_service: GitHubService) -> Arc<AppState> {
-    Arc::new(
-        AppState::with_github_service(base_test_config(), github_service)
-            .expect("test state should initialize"),
-    )
+    Arc::new(AppState::with_services(
+        base_test_config(),
+        github_service,
+        AuthVerifier::mock(axum_playground::MockAuthVerifier::test_user()),
+        ProfileService::mock(axum_playground::MockProfileService::default()),
+    ))
 }
 
 pub fn test_state_with_auth_and_profile(

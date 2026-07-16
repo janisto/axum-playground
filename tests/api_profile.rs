@@ -304,6 +304,22 @@ async fn openapi_includes_profile_path() {
         .expect("request should succeed");
 
     let body = read_text_body(response).await;
-    assert!(body.contains("\"/v1/profile\""));
-    assert!(body.contains("application/cbor"));
+    let document: serde_json::Value =
+        serde_json::from_str(&body).expect("OpenAPI document should be JSON");
+    let post = &document["paths"]["/v1/profile"]["post"];
+
+    assert_eq!(post["security"][0]["bearerAuth"], serde_json::json!([]));
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
+    assert_eq!(
+        post["requestBody"]["content"]
+            .as_object()
+            .expect("request content should be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["application/cbor", "application/json"]
+    );
 }

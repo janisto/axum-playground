@@ -65,7 +65,7 @@ async fn not_found_honors_cbor_negotiation() {
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
-        Some("application/problem+cbor")
+        Some("application/cbor")
     );
 
     let body: ProblemDetails = read_cbor_body(response).await;
@@ -150,5 +150,35 @@ async fn cors_preflight_uses_api_defaults() {
             .get(header::ACCESS_CONTROL_ALLOW_METHODS)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("GET"))
+    );
+}
+
+#[tokio::test]
+async fn swagger_ui_receives_compatible_security_headers() {
+    let response = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api-docs/")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_FRAME_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
     );
 }
