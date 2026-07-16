@@ -21,10 +21,11 @@ use crate::{
             profile::{
                 __path_create_profile_handler, __path_delete_profile_handler,
                 __path_get_profile_handler, __path_update_profile_handler,
+                AuthenticationUnavailableProblemResponse, UnauthorizedProblemResponse,
             },
         },
     },
-    problem::ProblemResponse,
+    problem::{ProblemDetails, ProblemFieldError, ProblemResponse},
     state::AppState,
 };
 
@@ -46,7 +47,14 @@ paths(
     get_github_repo_languages_handler,
     list_github_repo_tags_handler
 ),
-components(responses(ProblemResponse)),
+components(
+    schemas(ProblemDetails, ProblemFieldError),
+    responses(
+        ProblemResponse,
+        UnauthorizedProblemResponse,
+        AuthenticationUnavailableProblemResponse
+    )
+),
 modifiers(&SecurityAddon)
 )]
 struct ApiDoc;

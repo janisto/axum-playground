@@ -11,9 +11,7 @@ use axum_playground::{
 use serde::Deserialize;
 use tower::ServiceExt;
 
-use crate::common::{
-    read_cbor_body, read_json_body, read_text_body, test_state, test_state_with_github_service,
-};
+use crate::common::{read_cbor_body, read_json_body, test_state, test_state_with_github_service};
 
 #[derive(Debug, Deserialize)]
 struct Owner {
@@ -47,7 +45,7 @@ struct RepoActivityResponse {
 
 #[derive(Debug, Deserialize)]
 struct Activity {
-    actor: String,
+    actor: Option<String>,
     #[serde(rename = "activityType")]
     activity_type: String,
 }
@@ -142,7 +140,7 @@ async fn github_activity_languages_and_tags_routes_work() {
         activity
             .activities
             .first()
-            .map(|event| event.actor.as_str()),
+            .and_then(|event| event.actor.as_deref()),
         Some("octocat")
     );
     assert_eq!(
@@ -195,14 +193,26 @@ async fn github_activity_languages_and_tags_routes_work() {
 async fn github_activity_uses_link_header_and_validates_cursor() {
     let service = GitHubService::mock(MockGitHubService::demo().with_activity_page(
         GitHubActivityPage {
-            activities: vec![GitHubActivity {
-                id: 1,
-                actor: "octocat".to_string(),
-                git_ref: "refs/heads/master".to_string(),
-                timestamp: "2024-01-15T10:30:00Z".to_string(),
-                activity_type: "push".to_string(),
-                actor_avatar_url: "https://avatars.githubusercontent.com/u/583231".to_string(),
-            }],
+            activities: vec![
+                GitHubActivity {
+                    id: 1,
+                    actor: Some("octocat".to_string()),
+                    git_ref: "refs/heads/master".to_string(),
+                    timestamp: "2024-01-15T10:30:00Z".to_string(),
+                    activity_type: "push".to_string(),
+                    actor_avatar_url: Some(
+                        "https://avatars.githubusercontent.com/u/583231".to_string(),
+                    ),
+                },
+                GitHubActivity {
+                    id: 2,
+                    actor: None,
+                    git_ref: "refs/heads/deleted".to_string(),
+                    timestamp: "2024-01-15T11:30:00Z".to_string(),
+                    activity_type: "branch_deletion".to_string(),
+                    actor_avatar_url: None,
+                },
+            ],
             next_cursor: "next-page-cursor".to_string(),
         },
     ));
@@ -233,6 +243,10 @@ async fn github_activity_uses_link_header_and_validates_cursor() {
             .as_str()
         )
     );
+    let activity: RepoActivityResponse = read_json_body(response).await;
+    assert_eq!(activity.count, 2);
+    assert_eq!(activity.activities[0].actor.as_deref(), Some("octocat"));
+    assert_eq!(activity.activities[1].actor, None);
 
     let invalid_cursor = build_app(test_state())
         .oneshot(
@@ -433,9 +447,29 @@ async fn openapi_includes_github_paths() {
         .await
         .expect("request should succeed");
 
-    let body = read_text_body(response).await;
-    assert!(body.contains("\"/v1/github/owners/{owner}\""));
-    assert!(body.contains("\"/v1/github/repos/{owner}/{repo}/tags\""));
-    assert!(body.contains("application/problem+json"));
-    assert!(body.contains("application/cbor"));
+    let document: serde_json::Value = read_json_body(response).await;
+    assert!(document["paths"].get("/v1/github/owners/{owner}").is_some());
+    assert!(
+        document["paths"]
+            .get("/v1/github/repos/{owner}/{repo}/tags")
+            .is_some()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["Activity"]["properties"]["actor"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    assert_eq!(
+        document["components"]["schemas"]["Activity"]["properties"]["actorAvatarUrl"]["type"],
+        serde_json::json!(["string", "null"])
+    );
+    assert!(
+        document["components"]["responses"]["ProblemResponse"]["content"]
+            .get("application/problem+json")
+            .is_some()
+    );
+    assert!(
+        document["components"]["responses"]["ProblemResponse"]["content"]
+            .get("application/cbor")
+            .is_some()
+    );
 }

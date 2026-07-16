@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{FirestoreDb, FirestoreWritePrecondition, errors::FirestoreError};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -236,13 +237,14 @@ impl FirestoreProfileStore {
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         let profile = build_profile(user_id, params);
+        let document_id = profile_document_id(user_id);
         let db = self.db().await?;
 
         match db
             .fluent()
             .insert()
             .into(PROFILES_COLLECTION)
-            .document_id(user_id)
+            .document_id(&document_id)
             .object(&profile)
             .execute::<Profile>()
             .await
@@ -265,12 +267,13 @@ impl FirestoreProfileStore {
 
     async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
         let profile: Option<Profile> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
             .obj()
-            .one(user_id)
+            .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileMutation::Get))?;
 
@@ -283,12 +286,13 @@ impl FirestoreProfileStore {
         params: UpdateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
         let profile: Option<Profile> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
             .obj()
-            .one(user_id)
+            .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileMutation::Update))?;
 
@@ -305,7 +309,7 @@ impl FirestoreProfileStore {
             .fields(fields.iter().map(String::as_str))
             .in_col(PROFILES_COLLECTION)
             .precondition(FirestoreWritePrecondition::Exists(true))
-            .document_id(user_id)
+            .document_id(&document_id)
             .object(&profile)
             .execute::<Profile>()
             .await
@@ -328,12 +332,13 @@ impl FirestoreProfileStore {
 
     async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
 
         match db
             .fluent()
             .delete()
             .from(PROFILES_COLLECTION)
-            .document_id(user_id)
+            .document_id(&document_id)
             .precondition(FirestoreWritePrecondition::Exists(true))
             .execute()
             .await
@@ -371,6 +376,10 @@ fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
         ProfileServiceError::AlreadyExists => "already_exists",
         ProfileServiceError::Backend(_) => "backend",
     }
+}
+
+fn profile_document_id(user_id: &str) -> String {
+    format!("uid_{}", URL_SAFE_NO_PAD.encode(user_id))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -466,8 +475,23 @@ fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> Prof
 mod tests {
     use super::{
         CreateProfileParams, MockProfileService, ProfileService, ProfileServiceError,
-        UpdateProfileParams,
+        UpdateProfileParams, profile_document_id,
     };
+
+    #[test]
+    fn firestore_document_id_safely_encodes_opaque_firebase_uids() {
+        assert_eq!(profile_document_id("tenant/user"), "uid_dGVuYW50L3VzZXI");
+        assert_eq!(profile_document_id("."), "uid_Lg");
+        assert_eq!(profile_document_id(".."), "uid_Li4");
+
+        for user_id in ["tenant/user", ".", "..", "\u{ffff}"] {
+            let document_id = profile_document_id(user_id);
+            assert!(!document_id.contains('/'));
+            assert_ne!(document_id, ".");
+            assert_ne!(document_id, "..");
+            assert!(!document_id.starts_with("__"));
+        }
+    }
 
     #[tokio::test]
     async fn mock_service_normalizes_email_and_phone() {

@@ -7,6 +7,7 @@ use axum_playground::{
 const EMULATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const EMULATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PROJECT_ID: &str = "demo-test-project";
+const USER_ID: &str = "tenant/user";
 
 #[tokio::test]
 async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured() {
@@ -22,7 +23,7 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
 
     let created = service
         .create(
-            "user-123",
+            USER_ID,
             CreateProfileParams {
                 firstname: "John".to_string(),
                 lastname: "Doe".to_string(),
@@ -37,10 +38,11 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
 
     assert_eq!(created.email, "john@example.com");
     assert_eq!(created.phone_number, "+358401234567");
+    assert_eq!(created.id, USER_ID);
 
     let duplicate = service
         .create(
-            "user-123",
+            USER_ID,
             CreateProfileParams {
                 firstname: "Jane".to_string(),
                 lastname: "Doe".to_string(),
@@ -55,14 +57,14 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
     assert_eq!(duplicate, ProfileServiceError::AlreadyExists);
 
     let fetched = service
-        .get("user-123")
+        .get(USER_ID)
         .await
         .expect("get should succeed against emulator");
     assert_eq!(fetched.firstname, "John");
 
     let updated = service
         .update(
-            "user-123",
+            USER_ID,
             UpdateProfileParams {
                 firstname: Some("Jane".to_string()),
                 email: Some("UPDATED@EXAMPLE.COM".to_string()),
@@ -78,12 +80,12 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
     assert!(!updated.marketing);
 
     service
-        .delete("user-123")
+        .delete(USER_ID)
         .await
         .expect("delete should succeed against emulator");
 
     let missing = service
-        .get("user-123")
+        .get(USER_ID)
         .await
         .expect_err("deleted profile should not be found");
     assert_eq!(missing, ProfileServiceError::NotFound);

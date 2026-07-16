@@ -276,7 +276,9 @@ impl ProductionAuthVerifier {
             return Err(AuthError::UserDisabled);
         }
 
-        if token_is_revoked(lookup.valid_since_epoch(), claims.auth_time) {
+        let valid_since = lookup.valid_since_epoch()?;
+        let auth_time = claims.auth_time.ok_or(AuthError::InvalidToken)?;
+        if token_is_revoked(valid_since, auth_time) {
             return Err(AuthError::TokenRevoked);
         }
 
@@ -392,8 +394,12 @@ impl IdentityPlatformLookupClient {
 }
 
 impl IdentityLookupUser {
-    fn valid_since_epoch(&self) -> Option<u64> {
-        self.valid_since.as_deref()?.parse().ok()
+    fn valid_since_epoch(&self) -> Result<u64, AuthError> {
+        self.valid_since
+            .as_deref()
+            .ok_or(AuthError::ServiceUnavailable)?
+            .parse()
+            .map_err(|_| AuthError::ServiceUnavailable)
     }
 }
 
@@ -521,8 +527,8 @@ fn unix_timestamp_now() -> u64 {
         .as_secs()
 }
 
-fn token_is_revoked(valid_since: Option<u64>, auth_time: Option<u64>) -> bool {
-    matches!((valid_since, auth_time), (Some(valid_since), Some(auth_time)) if auth_time < valid_since)
+fn token_is_revoked(valid_since: u64, auth_time: u64) -> bool {
+    auth_time < valid_since
 }
 
 fn map_jwt_error(error: JwtError) -> AuthError {
@@ -607,8 +613,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthError, AuthVerifier, EmulatorAuthVerifier, FirebaseUser, expected_issuer,
-        extract_bearer_token, token_is_revoked,
+        AuthError, AuthVerifier, EmulatorAuthVerifier, FirebaseUser, IdentityLookupUser,
+        expected_issuer, extract_bearer_token, token_is_revoked,
     };
     use crate::{config::AppConfig, error::StartupError};
 
@@ -662,9 +668,27 @@ mod tests {
 
     #[test]
     fn revocation_uses_auth_time_instead_of_token_issue_time() {
-        assert!(token_is_revoked(Some(200), Some(100)));
-        assert!(!token_is_revoked(Some(200), Some(200)));
-        assert!(!token_is_revoked(Some(200), None));
+        assert!(token_is_revoked(200, 100));
+        assert!(!token_is_revoked(200, 200));
+    }
+
+    #[test]
+    fn revocation_metadata_fails_closed_when_missing_or_malformed() {
+        let user = |valid_since: Option<&str>| IdentityLookupUser {
+            local_id: "user-123".to_string(),
+            disabled: false,
+            valid_since: valid_since.map(ToOwned::to_owned),
+        };
+
+        assert_eq!(user(Some("200")).valid_since_epoch(), Ok(200));
+        assert_eq!(
+            user(None).valid_since_epoch(),
+            Err(AuthError::ServiceUnavailable)
+        );
+        assert_eq!(
+            user(Some("not-a-timestamp")).valid_since_epoch(),
+            Err(AuthError::ServiceUnavailable)
+        );
     }
 
     #[tokio::test]

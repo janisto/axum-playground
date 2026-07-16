@@ -199,11 +199,19 @@ fn valid_json_content_type_parameters(parameters: &[&str]) -> bool {
     match parameters {
         [] => true,
         [parameter] => parameter.split_once('=').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("charset")
-                && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            name.trim().eq_ignore_ascii_case("charset") && valid_utf8_charset(value)
         }),
         _ => false,
     }
+}
+
+fn valid_utf8_charset(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("utf-8")
+        || value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .is_some_and(|value| value.eq_ignore_ascii_case("utf-8"))
 }
 
 #[cfg(test)]
@@ -319,5 +327,47 @@ mod tests {
             decode_request_body::<Payload>(&cbor_headers, Bytes::from(payload)),
             Err(RequestBodyDecodeError::Invalid)
         );
+    }
+
+    #[test]
+    fn decode_request_body_requires_balanced_json_charset_quotes() {
+        for content_type in [
+            "application/json; charset=utf-8",
+            "application/json; charset=\"UTF-8\"",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).expect("content type should be valid"),
+            );
+            assert!(
+                decode_request_body::<Payload>(
+                    &headers,
+                    Bytes::from_static(br#"{"message":"json"}"#),
+                )
+                .is_ok()
+            );
+        }
+
+        for content_type in [
+            "application/json; charset=\"utf-8",
+            "application/json; charset=utf-8\"",
+            "application/json; charset=\"\"utf-8\"\"",
+            "application/json; charset=iso-8859-1",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).expect("content type should be valid"),
+            );
+            assert_eq!(
+                decode_request_body::<Payload>(
+                    &headers,
+                    Bytes::from_static(br#"{"message":"json"}"#),
+                ),
+                Err(RequestBodyDecodeError::UnsupportedMediaType),
+                "{content_type} should be rejected"
+            );
+        }
     }
 }

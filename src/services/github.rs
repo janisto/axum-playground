@@ -98,14 +98,14 @@ pub struct ActivityPage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Activity {
     pub id: i64,
-    pub actor: String,
+    pub actor: Option<String>,
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub timestamp: String,
     #[serde(rename = "activityType")]
     pub activity_type: String,
     #[serde(rename = "actorAvatarUrl")]
-    pub actor_avatar_url: String,
+    pub actor_avatar_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
@@ -287,11 +287,13 @@ impl MockGitHubService {
             activity_page: ActivityPage {
                 activities: vec![Activity {
                     id: 1,
-                    actor: "octocat".to_string(),
+                    actor: Some("octocat".to_string()),
                     git_ref: "refs/heads/master".to_string(),
                     timestamp: "2024-01-15T10:30:00Z".to_string(),
                     activity_type: "push".to_string(),
-                    actor_avatar_url: "https://avatars.githubusercontent.com/u/583231".to_string(),
+                    actor_avatar_url: Some(
+                        "https://avatars.githubusercontent.com/u/583231".to_string(),
+                    ),
                 }],
                 next_cursor: String::new(),
             },
@@ -733,23 +735,33 @@ impl GitHubRepoPayload {
 #[derive(Debug, Deserialize)]
 struct GitHubActivityPayload {
     id: i64,
-    actor: String,
+    actor: Option<GitHubActivityActorPayload>,
     #[serde(rename = "ref")]
     git_ref: String,
     timestamp: String,
     activity_type: String,
-    actor_avatar_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubActivityActorPayload {
+    login: String,
+    avatar_url: String,
 }
 
 impl GitHubActivityPayload {
     fn into_activity(self) -> Activity {
+        let (actor, actor_avatar_url) = self
+            .actor
+            .map(|actor| (Some(actor.login), Some(actor.avatar_url)))
+            .unwrap_or((None, None));
+
         Activity {
             id: self.id,
-            actor: self.actor,
+            actor,
             git_ref: self.git_ref,
             timestamp: self.timestamp,
             activity_type: self.activity_type,
-            actor_avatar_url: self.actor_avatar_url,
+            actor_avatar_url,
         }
     }
 }
@@ -923,11 +935,20 @@ mod tests {
                     Json(json!([
                         {
                             "id": 1,
-                            "actor": "octocat",
+                            "actor": {
+                                "login": "octocat",
+                                "avatar_url": "https://avatars.githubusercontent.com/u/583231"
+                            },
                             "ref": "refs/heads/master",
                             "timestamp": "2024-01-15T10:30:00Z",
-                            "activity_type": "push",
-                            "actor_avatar_url": "https://avatars.githubusercontent.com/u/583231"
+                            "activity_type": "push"
+                        },
+                        {
+                            "id": 2,
+                            "actor": null,
+                            "ref": "refs/heads/deleted",
+                            "timestamp": "2024-01-15T11:30:00Z",
+                            "activity_type": "branch_deletion"
                         }
                     ])),
                 )
@@ -943,7 +964,14 @@ mod tests {
         handle.abort();
 
         assert_eq!(page.next_cursor, "abc123");
-        assert_eq!(page.activities.len(), 1);
+        assert_eq!(page.activities.len(), 2);
+        assert_eq!(page.activities[0].actor.as_deref(), Some("octocat"));
+        assert_eq!(
+            page.activities[0].actor_avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/583231")
+        );
+        assert_eq!(page.activities[1].actor, None);
+        assert_eq!(page.activities[1].actor_avatar_url, None);
     }
 
     #[tokio::test]

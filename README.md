@@ -24,7 +24,7 @@ It showcases tracing-based request logging, RFC 9457 Problem Details for errors,
 - OpenAPI 3.1 documentation at `/v1/openapi`, including JSON/CBOR request and response media types plus bearer auth, with Swagger UI at `/api-docs`
 - A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedBy` links
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
-- Firestore-backed profile persistence with normalization and audit logging
+- Firestore-backed profile persistence with safe opaque-UID document keys, normalization, and audit logging
 - Health check endpoint at `/health`
 
 ### API Design Principles
@@ -139,7 +139,7 @@ Choose either Application Default Credentials or the local Firebase emulators be
 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 just run
 ```
 
-The emulator does not need to be running until an authenticated profile request is made. To exercise profile persistence, start both Firebase emulators as described below.
+Setting `FIREBASE_AUTH_EMULATOR_HOST` selects the loopback-only emulator verifier; the server validates those tokens locally and does not connect to the Auth emulator. Run the Auth emulator when you need it to issue test tokens. To exercise profile persistence, start the Firestore emulator as described below.
 
 Then visit:
 
@@ -240,10 +240,9 @@ Run `just --list` to see all available recipes.
 
 #### Firebase Emulators
 
-Firestore integration tests require the Firebase emulators. Start them before running emulator-backed tests and export both host variables:
+Firestore integration tests require the Firestore emulator. Start it before running emulator-backed tests and export its host:
 
 ```bash
-export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 just test-emulators
 ```
