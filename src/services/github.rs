@@ -1,7 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, Error as _},
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use utoipa::ToSchema;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
@@ -467,10 +471,7 @@ impl HttpGitHubService {
             .get("link")
             .and_then(|value| value.to_str().ok())
             .and_then(extract_next_cursor);
-        let payload = response
-            .json::<Vec<GitHubActivityPayload>>()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))?;
+        let payload = decode_json::<Vec<GitHubActivityPayload>>(response).await?;
 
         Ok(ActivityPage {
             activities: payload
@@ -526,10 +527,7 @@ impl HttpGitHubService {
         T: DeserializeOwned,
     {
         let response = self.send(request).await?;
-        response
-            .json::<T>()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))
+        decode_json(response).await
     }
 
     async fn send(
@@ -630,6 +628,38 @@ fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
         .map(ToOwned::to_owned)
 }
 
+async fn decode_json<T>(response: reqwest::Response) -> Result<T, GitHubServiceError>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status().as_u16();
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status)))
+}
+
+fn deserialize_http_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let url = reqwest::Url::parse(&value).map_err(D::Error::custom)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(D::Error::custom("expected an absolute HTTP(S) URL"));
+    }
+    Ok(value)
+}
+
+fn deserialize_rfc3339<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    OffsetDateTime::parse(&value, &Rfc3339).map_err(D::Error::custom)?;
+    Ok(value)
+}
+
 fn extract_next_cursor(link_header: &str) -> Option<String> {
     link_header.split(',').find_map(|part| {
         let part = part.trim();
@@ -650,13 +680,17 @@ fn extract_next_cursor(link_header: &str) -> Option<String> {
 struct GitHubOwnerPayload {
     login: String,
     name: Option<String>,
+    #[serde(deserialize_with = "deserialize_http_url")]
     avatar_url: String,
+    #[serde(deserialize_with = "deserialize_http_url")]
     html_url: String,
     bio: Option<String>,
     location: Option<String>,
     blog: Option<String>,
     company: Option<String>,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     created_at: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     updated_at: String,
 }
 
@@ -682,12 +716,15 @@ struct GitHubRepoSummaryPayload {
     name: String,
     full_name: String,
     description: Option<String>,
+    #[serde(deserialize_with = "deserialize_http_url")]
     html_url: String,
     language: Option<String>,
     stargazers_count: i32,
     forks_count: i32,
     open_issues_count: i32,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     created_at: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     updated_at: String,
 }
 
@@ -743,6 +780,7 @@ struct GitHubActivityPayload {
     actor: Option<GitHubActivityActorPayload>,
     #[serde(rename = "ref")]
     git_ref: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     timestamp: String,
     activity_type: String,
 }
@@ -750,6 +788,7 @@ struct GitHubActivityPayload {
 #[derive(Debug, Deserialize)]
 struct GitHubActivityActorPayload {
     login: String,
+    #[serde(deserialize_with = "deserialize_http_url")]
     avatar_url: String,
 }
 
@@ -802,15 +841,15 @@ mod tests {
     use axum::{
         Json, Router,
         extract::Query,
-        http::{HeaderMap, StatusCode, header},
+        http::{HeaderMap, Response as HttpResponse, StatusCode, header},
         routing::get,
     };
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
     use super::{
-        GITHUB_ACCEPT, GitHubService, GitHubServiceError, GitHubServiceInner,
-        GitHubUpstreamErrorKind,
+        GITHUB_ACCEPT, GitHubActivityPayload, GitHubOwnerPayload, GitHubRepoPayload, GitHubService,
+        GitHubServiceError, GitHubServiceInner, GitHubUpstreamErrorKind, decode_json,
     };
 
     async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -835,6 +874,102 @@ mod tests {
         assert_eq!(
             service.url(&["repos", "owner", "repo/name"]).as_str(),
             "https://api.github.test/repos/owner/repo%2Fname"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_contract_failure_preserves_successful_http_status() {
+        let payload = json!({
+            "login": "octocat",
+            "name": "The Octocat",
+            "avatar_url": "javascript:alert(1)",
+            "html_url": "https://github.com/octocat",
+            "bio": "",
+            "location": "San Francisco",
+            "blog": "https://github.blog",
+            "company": "@github",
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z"
+        });
+        let response = reqwest::Response::from(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .body(serde_json::to_vec(&payload).expect("payload should serialize"))
+                .expect("response should build"),
+        );
+
+        let error = decode_json::<GitHubOwnerPayload>(response)
+            .await
+            .expect_err("non-HTTP avatar URL should violate the upstream contract");
+
+        assert_eq!(
+            error,
+            GitHubServiceError::Upstream(super::GitHubUpstreamError::upstream(200))
+        );
+    }
+
+    #[test]
+    fn upstream_payloads_reject_invalid_urls_and_timestamps() {
+        let repo_with_invalid_url = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_url).is_err());
+
+        let repo_with_invalid_timestamp = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "https://github.com/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "yesterday",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_timestamp).is_err());
+
+        let activity_with_invalid_actor_url = json!({
+            "id": 1,
+            "actor": { "login": "octocat", "avatar_url": "not a URL" },
+            "ref": "refs/heads/main",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "activity_type": "push"
+        });
+        assert!(
+            serde_json::from_value::<GitHubActivityPayload>(activity_with_invalid_actor_url)
+                .is_err()
+        );
+
+        let activity_with_invalid_timestamp = json!({
+            "id": 1,
+            "actor": null,
+            "ref": "refs/heads/main",
+            "timestamp": "2024-13-99",
+            "activity_type": "push"
+        });
+        assert!(
+            serde_json::from_value::<GitHubActivityPayload>(activity_with_invalid_timestamp)
+                .is_err()
         );
     }
 
