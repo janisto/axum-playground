@@ -36,11 +36,12 @@ Instructions for coding agents working in this repository.
 
 ## Repository and toolchain
 
-- Rust 1.96.1, edition 2024, Axum 0.8, and Tokio are the current baseline. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
+- Rust 1.97.0, edition 2024, Axum 0.8, and Tokio are the current baseline. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
 - Prefer current official Rust, Axum, Tokio, Tower, and crate documentation over older examples, especially pre-Axum-0.8 or pre-edition-2024 patterns.
-- Use the root `Justfile` for normal workflows. `just qa` applies formatting before lint, build, and tests; use `just check` for the non-mutating repository gate and `just ci` for the broader CI-equivalent checks.
+- Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
 - Keep `Cargo.lock` checked in and never edit it manually. Use `cargo update` or `just lock` only for intentional dependency-resolution changes. If unrelated lockfile churn appears, stop instead of hand-editing it away.
+- Keep compatible Cargo requirements in `Cargo.toml`, exact resolution in `Cargo.lock`, Dependabot in `lockfile-only` mode, and repository CLI versions pinned in the `Justfile` and workflows.
 - Avoid new dependencies when the standard library or an existing crate fits. Prefer actively maintained, well-documented crates and justify additions against a concrete feature need.
 
 ## Application architecture
@@ -50,7 +51,7 @@ Instructions for coding agents working in this repository.
 - App-wide dependencies live in `AppState` behind `Arc<AppState>` and are passed through Axum state. Keep handlers stateless when they do not need services or configuration.
 - Put versioned route modules under `src/http/v1/`, export `pub fn router() -> Router<Arc<AppState>>`, merge them in `src/http/v1/mod.rs`, and add their documented handlers to `ApiDoc` in `src/http/v1/docs.rs`.
 - Keep `/health` and `/api-docs` at the root. Keep business routes and `/v1/openapi` under `/v1`.
-- Keep cross-cutting middleware centralized in `src/app.rs`. Preserve the request ID, panic recovery, request logging, security, CORS, timeout, and 1 MiB body-limit boundaries unless the task explicitly changes their contract.
+- Keep cross-cutting middleware centralized in `src/app.rs`. Preserve the `axum-observability` request correlation and terminal access logging layer, panic recovery, security, CORS, timeout, and 1 MiB body-limit boundaries unless the task explicitly changes their contract.
 - Preserve graceful shutdown through `tokio::select!` over Ctrl-C and Unix SIGTERM. The service must remain compatible with Cloud Run: bind `0.0.0.0:$PORT`, rely on platform TLS termination, and assume no persistent local filesystem.
 
 ## HTTP and API contracts
@@ -81,7 +82,7 @@ Instructions for coding agents working in this repository.
 - Use mock services for deterministic tests and the Firestore-backed profile service only when persistence semantics are under test. Preserve create-if-absent, ownership, audit, and timestamp behavior in the service layer. Derive Firestore profile document IDs with the shared prefixed Base64URL helper; Firebase UIDs are opaque and may contain Firestore path delimiters.
 - Keep runtime configuration in environment variables and `AppConfig`. Never commit or log credentials, tokens, service-account paths, authorization values, profile data, or other PII. Prefer Application Default Credentials and workload identity in deployed environments.
 - Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments.
-- Keep request logs and trace correlation in the existing tracing middleware. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
+- Keep request logs and trace correlation in `axum-observability`. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 
 ## Tests and validation

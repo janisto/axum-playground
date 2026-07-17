@@ -1,14 +1,17 @@
 use validator::ValidateEmail;
 
+#[must_use]
 pub fn valid_name(value: &str) -> bool {
     let len = value.chars().count();
     (1..=100).contains(&len)
 }
 
+#[must_use]
 pub fn valid_email(value: &str) -> bool {
     value.validate_email()
 }
 
+#[must_use]
 pub fn valid_phone_number(value: &str) -> bool {
     let Some(rest) = value.strip_prefix('+') else {
         return false;

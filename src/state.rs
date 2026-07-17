@@ -28,7 +28,7 @@ impl AppState {
         {
             return Err(StartupError::UnsafeEmulatorHost {
                 variable: "FIRESTORE_EMULATOR_HOST",
-                host: host.to_string(),
+                host: host.to_owned(),
             });
         }
 
@@ -44,6 +44,7 @@ impl AppState {
         ))
     }
 
+    #[must_use]
     pub fn with_services(
         config: AppConfig,
         github_service: GitHubService,
@@ -69,12 +70,12 @@ mod tests {
     fn runtime_state_rejects_non_loopback_firestore_emulator() {
         let config = AppConfig {
             port: 8080,
-            firebase_project_id: "project".to_string(),
-            app_environment: "development".to_string(),
+            firebase_project_id: "project".to_owned(),
+            app_environment: "development".to_owned(),
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
-            firestore_emulator_host: Some("firestore.example.com:8080".to_string()),
+            firestore_emulator_host: Some("firestore.example.com:8080".to_owned()),
             google_cloud_project: None,
             gcp_project: None,
             gcloud_project: None,

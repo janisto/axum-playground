@@ -2,12 +2,12 @@
 
 [![Build and tests](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-ci.yml?branch=main&label=build%20%26%20tests&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-ci.yml)
 [![Code quality](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-lint.yml?branch=main&label=code%20quality&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-lint.yml)
-[![Rust 1.96.1](https://img.shields.io/badge/Rust-1.96.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![Rust 1.97.0](https://img.shields.io/badge/Rust-1.97.0-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![MIT license](https://img.shields.io/github/license/janisto/axum-playground)](LICENSE)
 
 A public REST API example built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just). It is intentionally not deployed yet; the repository is the example and validation target.
 
-It showcases tracing-based request logging, RFC 9457 Problem Details for errors, JSON/CBOR content negotiation, and a modular route layout that is ready to grow into a larger service.
+It showcases `axum-observability`-based structured request logging, RFC 9457 Problem Details for errors, JSON/CBOR content negotiation, and a modular route layout that is ready to grow into a larger service.
 
 <img src="assets/ferris.svg" alt="Rust Ferris mascot illustration" width="400">
 
@@ -15,8 +15,9 @@ It showcases tracing-based request logging, RFC 9457 Problem Details for errors,
 
 ### Features
 
-- Layered middleware architecture with security headers, CORS, request IDs, panic recovery, timeouts, and tracing-based access logging
-- Request-scoped trace correlation via `traceparent`, falling back to the request ID when no Google trace context is present
+- Layered middleware architecture with security headers, CORS, panic recovery, timeouts, and [`axum-observability` v0.3.0](https://crates.io/crates/axum-observability/0.3.0) request correlation and terminal access logging
+- Request-scoped W3C trace correlation via `traceparent`, falling back to the validated request ID when no valid trace context is present
+- GCP-shaped structured JSON logs on stdout with query-free request paths and no in-process cloud logging client
 - RFC 9457 Problem Details for JSON errors and the same data model encoded as generic CBOR
 - Strict JSON/CBOR negotiation on versioned responses, including `406 Not Acceptable` and exact media-range precedence
 - Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
@@ -105,10 +106,10 @@ cp .env.example .env
 | `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
 | `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
 | `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | - |
-| `GOOGLE_CLOUD_PROJECT` | Optional Google project fallback for trace correlation | - |
-| `GCP_PROJECT` | Optional Google project fallback for trace correlation | - |
-| `GCLOUD_PROJECT` | Optional Google project fallback for trace correlation | - |
-| `PROJECT_ID` | Optional Google project fallback for trace correlation | - |
+| `GOOGLE_CLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
+| `GCP_PROJECT` | Optional Google project fallback for Firestore | - |
+| `GCLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
+| `PROJECT_ID` | Optional Google project fallback for Firestore | - |
 
 Notes:
 
@@ -122,14 +123,26 @@ Notes:
 
 ### Requirements
 
-- Rust 1.96.1 via `rust-toolchain.toml`
-- [Just](https://github.com/casey/just)
-- `cargo-nextest`
-- `cargo-llvm-cov`
-- `cargo-deny`
-- `cargo-audit`
+- Rust 1.97.0 via `rust-toolchain.toml`
+- [Just](https://github.com/casey/just) 1.56.0
+- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.27.0 for local workflow checks
 - [Firebase CLI](https://firebase.google.com/docs/cli) when running emulator-backed tests
 - Podman or Docker for local image builds
+
+Install the workflow linters through Homebrew, as in `axum-observability`:
+
+```bash
+brew install actionlint zizmor
+```
+
+The actionlint formula installs ShellCheck, which actionlint uses for embedded
+shell scripts. This repository does not require pyflakes because its workflows
+do not contain embedded Python scripts.
+
+Run `just install` to fetch the locked dependency graph and install the pinned
+Cargo QA tools: cargo-nextest 0.9.140, cargo-llvm-cov 0.8.7,
+cargo-deny 0.20.2, cargo-audit 0.22.2, cargo-sort 2.1.3, and
+cargo-machete 0.9.2.
 
 ### Quick Start
 
@@ -168,7 +181,7 @@ src/
 		negotiation.rs  # RFC 9110 JSON/CBOR selection
 		schema.rs       # Standalone Problem Details JSON Schema
 		v1/             # Versioned API routes and docs wiring
-	middleware/       # Cross-cutting HTTP middleware
+	middleware/       # Application-owned recovery, security, and timeout middleware
 	pagination/       # Cursor and RFC 8288 link helpers
 	problem/          # Problem Details model and response construction
 	services/         # GitHub and profile service implementations
@@ -217,18 +230,22 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | --- | --- |
 | `just build` | Build the application |
 | `just run` | Run the server |
-| `just install` | Alias for `just download` |
+| `just install` | Fetch dependencies and install pinned Cargo QA tools |
 | `just download` | Fetch locked Cargo dependencies |
 | `just update` | Update dependencies recorded in `Cargo.lock` within `Cargo.toml` constraints |
 | `just fmt` | Apply formatting |
 | `just fmt-check` | Verify formatting |
 | `just lint` | Run clippy with warnings denied |
-| `just qa` | Run format, lint, build, and tests |
+| `just doc` | Build documentation with all rustdoc lints denied |
+| `just sort-check` | Verify grouped manifest ordering |
+| `just unused-dependencies` | Detect unused direct dependencies |
+| `just workflow-check` | Validate workflows with actionlint and zizmor |
+| `just qa` | Run the non-mutating local quality gate |
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
 | `just test-emulators` | Run the Firestore emulator test when configured |
-| `just check` | Run format, lint, tests, and optional emulator coverage |
-| `just ci` | Run the CI-oriented local verification bundle |
+| `just check` | Run `just qa` plus optional emulator coverage |
+| `just ci` | Run `just qa` plus a container build |
 | `just coverage-lcov` | Generate `coverage.lcov` |
 | `just coverage-html` | Generate HTML coverage output |
 | `just deny` | Run dependency policy checks |
@@ -300,6 +317,8 @@ Production runtime expectations:
 - Firebase auth parsing, revocation semantics, and local-only emulator guardrails
 - Firestore-backed profile CRUD via an optional local emulator integration test
 - Dependency policy and vulnerability checks through `just deny` and `just audit`
+- Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
+- Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
 - Coverage export through `just coverage-lcov` and `just coverage-html`
 - Container image buildability through `just docker-build`
 
@@ -310,7 +329,8 @@ GitHub Actions workflows in `.github/workflows/`:
 | Workflow | Description |
 | --- | --- |
 | `app-ci.yml` | Build, tests, doctests, and coverage artifact generation |
-| `app-lint.yml` | Formatting, clippy, dependency policy, and security audit |
+| `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
+| `workflow-security.yml` | Hosted zizmor workflow security analysis |
 | `labeler.yml` | Automatic pull request labeling |
 | `labeler-manual.yml` | Manual backfill labeling for historical pull requests |
 | `dependabot-auto-merge.yml` | Auto-merge Dependabot minor and patch updates |

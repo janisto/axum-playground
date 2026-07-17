@@ -257,11 +257,8 @@ pub async fn list_github_repo_activity_handler(
         );
     }
 
-    let cursor = match decode_cursor(query.cursor.as_deref().unwrap_or_default()) {
-        Ok(cursor) => cursor,
-        Err(_) => {
-            return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
-        }
+    let Ok(cursor) = decode_cursor(query.cursor.as_deref().unwrap_or_default()) else {
+        return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
     };
 
     if !cursor.kind.is_empty() && cursor.kind != ACTIVITY_CURSOR_KIND {

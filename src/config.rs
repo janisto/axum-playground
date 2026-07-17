@@ -66,11 +66,11 @@ impl AppConfig {
             firebase_project_id: env::var("FIREBASE_PROJECT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "demo-test-project".to_string()),
+                .unwrap_or_else(|| "demo-test-project".to_owned()),
             app_environment: env::var("APP_ENVIRONMENT")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "development".to_string()),
+                .unwrap_or_else(|| "development".to_owned()),
             github_token: optional_env("GITHUB_TOKEN"),
             google_application_credentials: optional_env("GOOGLE_APPLICATION_CREDENTIALS"),
             firebase_auth_emulator_host: optional_env("FIREBASE_AUTH_EMULATOR_HOST"),
@@ -82,6 +82,7 @@ impl AppConfig {
         })
     }
 
+    #[must_use]
     pub fn resolved_google_project_id(&self) -> Option<&str> {
         self.google_cloud_project
             .as_deref()
@@ -91,10 +92,12 @@ impl AppConfig {
             .or(Some(self.firebase_project_id.as_str()))
     }
 
+    #[must_use]
     pub fn allows_local_emulators(&self) -> bool {
         matches!(self.app_environment.as_str(), "development" | "test")
     }
 
+    #[must_use]
     pub fn emulator_host_is_loopback(&self, host: &str) -> bool {
         if !self.allows_local_emulators() {
             return false;
@@ -120,10 +123,10 @@ mod tests {
     fn debug_output_redacts_secret_bearing_values() {
         let config = AppConfig {
             port: 8080,
-            firebase_project_id: "project".to_string(),
-            app_environment: "development".to_string(),
-            github_token: Some("secret-token".to_string()),
-            google_application_credentials: Some("/secret/credentials.json".to_string()),
+            firebase_project_id: "project".to_owned(),
+            app_environment: "development".to_owned(),
+            github_token: Some("secret-token".to_owned()),
+            google_application_credentials: Some("/secret/credentials.json".to_owned()),
             firebase_auth_emulator_host: None,
             firestore_emulator_host: None,
             google_cloud_project: None,
@@ -142,8 +145,8 @@ mod tests {
     fn emulator_hosts_are_limited_to_local_environments_and_loopback() {
         let mut config = AppConfig {
             port: 8080,
-            firebase_project_id: "project".to_string(),
-            app_environment: "development".to_string(),
+            firebase_project_id: "project".to_owned(),
+            app_environment: "development".to_owned(),
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
@@ -159,7 +162,7 @@ mod tests {
         assert!(!config.emulator_host_is_loopback("emulator.example.com:9099"));
         assert!(!config.emulator_host_is_loopback("127.0.0.1"));
 
-        config.app_environment = "production".to_string();
+        config.app_environment = "production".to_owned();
         assert!(!config.emulator_host_is_loopback("127.0.0.1:9099"));
     }
 }

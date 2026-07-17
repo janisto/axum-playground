@@ -16,6 +16,7 @@ impl Cursor {
         }
     }
 
+    #[must_use]
     pub fn encode(&self) -> String {
         URL_SAFE_NO_PAD.encode(format!("{}:{}", self.kind, self.value))
     }

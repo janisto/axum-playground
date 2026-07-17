@@ -105,11 +105,8 @@ pub async fn list_items_handler(
         );
     }
 
-    let cursor = match decode_cursor(query.cursor.as_deref().unwrap_or_default()) {
-        Ok(cursor) => cursor,
-        Err(_) => {
-            return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
-        }
+    let Ok(cursor) = decode_cursor(query.cursor.as_deref().unwrap_or_default()) else {
+        return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
     };
 
     if !cursor.kind.is_empty() && cursor.kind != ITEM_CURSOR_KIND {
@@ -138,7 +135,7 @@ pub async fn list_items_handler(
     let query_pairs = query
         .category
         .iter()
-        .map(|category| ("category".to_string(), category.clone()))
+        .map(|category| ("category".to_owned(), category.clone()))
         .collect::<Vec<_>>();
     let page = paginate(
         &filtered_items,
@@ -460,12 +457,12 @@ fn item(
     description: &str,
 ) -> Item {
     Item {
-        id: id.to_string(),
-        name: name.to_string(),
-        category: category.to_string(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        category: category.to_owned(),
         price,
         in_stock,
-        created_at: created_at.to_string(),
-        description: description.to_string(),
+        created_at: created_at.to_owned(),
+        description: description.to_owned(),
     }
 }

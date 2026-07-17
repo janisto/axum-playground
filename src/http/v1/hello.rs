@@ -47,7 +47,7 @@ pub async fn get_hello_handler(format: ResponseFormat) -> Response {
         StatusCode::OK,
         format,
         &HelloData {
-            message: "Hello, World!".to_string(),
+            message: "Hello, World!".to_owned(),
         },
     )
 }

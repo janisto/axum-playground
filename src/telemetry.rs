@@ -1,6 +1,13 @@
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use axum_observability::{FieldConvention, ObservabilityConfig};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::error::StartupError;
+
+pub(crate) fn observability_config() -> ObservabilityConfig {
+    ObservabilityConfig::default()
+        .with_field_convention(FieldConvention::Gcp)
+        .with_raw_path(true)
+}
 
 pub fn init_tracing(app_environment: &str) -> Result<(), StartupError> {
     let default_filter = match app_environment {
@@ -13,12 +20,7 @@ pub fn init_tracing(app_environment: &str) -> Result<(), StartupError> {
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(
-            fmt::layer()
-                .json()
-                .with_current_span(false)
-                .with_span_list(false),
-        )
+        .with(observability_config().json_layer(std::io::stdout))
         .try_init()?;
 
     Ok(())

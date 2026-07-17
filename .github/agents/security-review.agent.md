@@ -13,8 +13,8 @@ Before analysis, read these files:
 1. `src/main.rs` - application setup and startup wiring
 2. `src/app.rs` - router setup, middleware order, and CORS configuration
 3. `src/middleware/security.rs` - security headers middleware
-4. `src/middleware/request_id.rs` - request ID middleware
-5. `src/middleware/logging.rs` - request logging middleware
+4. `src/telemetry.rs` - `axum-observability` structured logging configuration
+5. `Cargo.toml` and `Cargo.lock` - the pinned `axum-observability` version
 6. `src/middleware/recover.rs` - panic recovery middleware
 7. `src/middleware/timeout.rs` - timeout behavior
 8. `src/problem/mod.rs` - Problem Details responses

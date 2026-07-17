@@ -32,7 +32,7 @@ pub struct ProblemDetails {
     pub errors: Option<Vec<ProblemFieldError>>,
 }
 
-#[derive(ToResponse)]
+#[derive(Debug, ToResponse)]
 #[response(description = "Problem Details error")]
 pub enum ProblemResponse {
     Json(#[content("application/problem+json")] ProblemDetails),
@@ -51,6 +51,7 @@ impl ProblemDetails {
         }
     }
 
+    #[must_use]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -177,7 +178,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        let body = to_bytes(response.into_body(), usize::MAX)
+        let body = to_bytes(response.into_body(), 4_096)
             .await
             .expect("problem body should be readable");
         let problem: ProblemDetails =

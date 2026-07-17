@@ -29,7 +29,7 @@ fn authorized_json_request(method: Method, uri: &str, body: &str) -> Request<Bod
         .uri(uri)
         .header(header::AUTHORIZATION, "Bearer valid-token")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
+        .body(Body::from(body.to_owned()))
         .expect("request should build")
 }
 
@@ -318,7 +318,7 @@ async fn profile_backend_errors_return_500() {
     let state = test_state_with_auth_and_profile(
         axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
         ProfileService::mock(MockProfileService::default().with_error(
-            ProfileServiceError::Backend("unexpected database error".to_string()),
+            ProfileServiceError::Backend("unexpected database error".to_owned()),
         )),
     );
 

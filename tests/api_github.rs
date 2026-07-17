@@ -196,24 +196,24 @@ async fn github_activity_uses_link_header_and_validates_cursor() {
             activities: vec![
                 GitHubActivity {
                     id: 1,
-                    actor: Some("octocat".to_string()),
-                    git_ref: "refs/heads/master".to_string(),
-                    timestamp: "2024-01-15T10:30:00Z".to_string(),
-                    activity_type: "push".to_string(),
+                    actor: Some("octocat".to_owned()),
+                    git_ref: "refs/heads/master".to_owned(),
+                    timestamp: "2024-01-15T10:30:00Z".to_owned(),
+                    activity_type: "push".to_owned(),
                     actor_avatar_url: Some(
-                        "https://avatars.githubusercontent.com/u/583231".to_string(),
+                        "https://avatars.githubusercontent.com/u/583231".to_owned(),
                     ),
                 },
                 GitHubActivity {
                     id: 2,
                     actor: None,
-                    git_ref: "refs/heads/deleted".to_string(),
-                    timestamp: "2024-01-15T11:30:00Z".to_string(),
-                    activity_type: "branch_deletion".to_string(),
+                    git_ref: "refs/heads/deleted".to_owned(),
+                    timestamp: "2024-01-15T11:30:00Z".to_owned(),
+                    activity_type: "branch_deletion".to_owned(),
                     actor_avatar_url: None,
                 },
             ],
-            next_cursor: "next-page-cursor".to_string(),
+            next_cursor: "next-page-cursor".to_owned(),
         },
     ));
     let response = build_app(test_state_with_github_service(service))
@@ -382,8 +382,8 @@ async fn github_error_mapping_covers_not_found_forbidden_rate_limit_and_upstream
         MockGitHubService::demo().with_error(GitHubServiceError::Upstream(GitHubUpstreamError {
             kind: GitHubUpstreamErrorKind::RateLimited,
             status: 403,
-            retry_after: Some("60".to_string()),
-            rate_limit_reset: Some("1700000000".to_string()),
+            retry_after: Some("60".to_owned()),
+            rate_limit_reset: Some("1700000000".to_owned()),
         })),
     )))
     .oneshot(

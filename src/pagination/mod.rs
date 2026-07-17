@@ -61,7 +61,7 @@ where
     let mut owned_query = query_pairs.to_vec();
     if limit > 0 {
         owned_query.retain(|(key, _)| key != "limit");
-        owned_query.push(("limit".to_string(), limit.to_string()));
+        owned_query.push(("limit".to_owned(), limit.to_string()));
     }
 
     let borrowed_query = owned_query

@@ -41,7 +41,7 @@ async fn list_items_returns_first_page_with_next_link() {
         .get(header::LINK)
         .and_then(|value| value.to_str().ok())
         .expect("link header should exist")
-        .to_string();
+        .to_owned();
     let body: ItemsResponse = read_json_body(response).await;
 
     assert_eq!(body.items.len(), 20);
@@ -74,7 +74,7 @@ async fn list_items_middle_page_has_prev_and_next_links() {
         .get(header::LINK)
         .and_then(|value| value.to_str().ok())
         .expect("link header should exist")
-        .to_string();
+        .to_owned();
     let body: ItemsResponse = read_json_body(response).await;
 
     assert_eq!(body.items.len(), 5);
@@ -106,7 +106,7 @@ async fn list_items_preserves_category_and_supports_cbor() {
         .get(header::LINK)
         .and_then(|value| value.to_str().ok())
         .expect("link header should exist")
-        .to_string();
+        .to_owned();
     assert_eq!(
         response
             .headers()

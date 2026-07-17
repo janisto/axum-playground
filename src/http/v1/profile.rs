@@ -78,7 +78,7 @@ fn accepted_terms_schema() -> Object {
         .build()
 }
 
-#[derive(ToResponse)]
+#[derive(Debug, ToResponse)]
 #[response(
     description = "Missing or invalid bearer authentication",
     headers(("WWW-Authenticate" = String, description = "Bearer authentication challenge"))
@@ -88,7 +88,7 @@ pub enum UnauthorizedProblemResponse {
     Cbor(#[content("application/cbor")] ProblemDetails),
 }
 
-#[derive(ToResponse)]
+#[derive(Debug, ToResponse)]
 #[response(
     description = "Authentication dependency temporarily unavailable",
     headers(("Retry-After" = String, description = "May indicate when certificate retrieval can be retried"))
@@ -142,15 +142,12 @@ pub async fn create_profile_handler(
         Err(error) => return error.into_response(&headers),
     };
 
-    let params = match parse_create_body(input) {
-        Ok(params) => params,
-        Err(()) => {
-            return problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "validation error",
-                &headers,
-            );
-        }
+    let Ok(params) = parse_create_body(input) else {
+        return problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation error",
+            &headers,
+        );
     };
 
     match state.profile_service.create(&user.0.uid, params).await {
@@ -224,15 +221,12 @@ pub async fn update_profile_handler(
         Err(error) => return error.into_response(&headers),
     };
 
-    let params = match parse_update_body(input) {
-        Ok(params) => params,
-        Err(()) => {
-            return problem_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "validation error",
-                &headers,
-            );
-        }
+    let Ok(params) = parse_update_body(input) else {
+        return problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation error",
+            &headers,
+        );
     };
 
     match state.profile_service.update(&user.0.uid, params).await {
@@ -330,6 +324,10 @@ fn parse_update_body(input: UpdateProfileBody) -> Result<UpdateProfileParams, ()
     })
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the handler transfers ownership of the service failure"
+)]
 fn map_service_error(headers: &HeaderMap, error: ProfileServiceError) -> Response {
     match error {
         ProfileServiceError::NotFound => {

@@ -150,16 +150,18 @@ pub enum GitHubUpstreamErrorKind {
 }
 
 impl GitHubService {
+    #[must_use]
     pub fn http(token: Option<String>) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Http(HttpGitHubService {
                 client: Client::new(),
-                base_url: DEFAULT_BASE_URL.to_string(),
+                base_url: DEFAULT_BASE_URL.to_owned(),
                 token,
             })),
         }
     }
 
+    #[must_use]
     pub fn mock(mock: MockGitHubService) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Mock(Box::new(mock))),
@@ -239,47 +241,48 @@ impl GitHubService {
 }
 
 impl MockGitHubService {
+    #[must_use]
     pub fn demo() -> Self {
         Self {
             owner: Some(Owner {
-                login: "octocat".to_string(),
-                name: "The Octocat".to_string(),
-                avatar_url: "https://avatars.githubusercontent.com/u/583231".to_string(),
-                html_url: "https://github.com/octocat".to_string(),
+                login: "octocat".to_owned(),
+                name: "The Octocat".to_owned(),
+                avatar_url: "https://avatars.githubusercontent.com/u/583231".to_owned(),
+                html_url: "https://github.com/octocat".to_owned(),
                 bio: String::new(),
-                location: "San Francisco".to_string(),
-                blog: "https://github.blog".to_string(),
-                company: "@github".to_string(),
-                created_at: "2011-01-25T18:44:36Z".to_string(),
-                updated_at: "2024-06-01T00:00:00Z".to_string(),
+                location: "San Francisco".to_owned(),
+                blog: "https://github.blog".to_owned(),
+                company: "@github".to_owned(),
+                created_at: "2011-01-25T18:44:36Z".to_owned(),
+                updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }),
             repos: vec![RepoSummary {
-                name: "git-consortium".to_string(),
-                full_name: "octocat/git-consortium".to_string(),
-                description: "This repo is for demonstration purposes.".to_string(),
-                html_url: "https://github.com/octocat/git-consortium".to_string(),
-                language: "Ruby".to_string(),
+                name: "git-consortium".to_owned(),
+                full_name: "octocat/git-consortium".to_owned(),
+                description: "This repo is for demonstration purposes.".to_owned(),
+                html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                language: "Ruby".to_owned(),
                 stars: 16,
                 forks: 10,
                 open_issues: 0,
-                created_at: "2011-01-25T18:44:36Z".to_string(),
-                updated_at: "2024-06-01T00:00:00Z".to_string(),
+                created_at: "2011-01-25T18:44:36Z".to_owned(),
+                updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }],
             repo: Some(Repo {
                 repo_summary: RepoSummary {
-                    name: "git-consortium".to_string(),
-                    full_name: "octocat/git-consortium".to_string(),
-                    description: "This repo is for demonstration purposes.".to_string(),
-                    html_url: "https://github.com/octocat/git-consortium".to_string(),
-                    language: "Ruby".to_string(),
+                    name: "git-consortium".to_owned(),
+                    full_name: "octocat/git-consortium".to_owned(),
+                    description: "This repo is for demonstration purposes.".to_owned(),
+                    html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                    language: "Ruby".to_owned(),
                     stars: 16,
                     forks: 10,
                     open_issues: 0,
-                    created_at: "2011-01-25T18:44:36Z".to_string(),
-                    updated_at: "2024-06-01T00:00:00Z".to_string(),
+                    created_at: "2011-01-25T18:44:36Z".to_owned(),
+                    updated_at: "2024-06-01T00:00:00Z".to_owned(),
                 },
-                default_branch: "master".to_string(),
-                license: "MIT License".to_string(),
+                default_branch: "master".to_owned(),
+                license: "MIT License".to_owned(),
                 topics: Vec::new(),
                 archived: false,
                 disabled: false,
@@ -287,35 +290,37 @@ impl MockGitHubService {
             activity_page: ActivityPage {
                 activities: vec![Activity {
                     id: 1,
-                    actor: Some("octocat".to_string()),
-                    git_ref: "refs/heads/master".to_string(),
-                    timestamp: "2024-01-15T10:30:00Z".to_string(),
-                    activity_type: "push".to_string(),
+                    actor: Some("octocat".to_owned()),
+                    git_ref: "refs/heads/master".to_owned(),
+                    timestamp: "2024-01-15T10:30:00Z".to_owned(),
+                    activity_type: "push".to_owned(),
                     actor_avatar_url: Some(
-                        "https://avatars.githubusercontent.com/u/583231".to_string(),
+                        "https://avatars.githubusercontent.com/u/583231".to_owned(),
                     ),
                 }],
                 next_cursor: String::new(),
             },
             languages: vec![Language {
-                name: "Ruby".to_string(),
+                name: "Ruby".to_owned(),
                 bytes: 6789,
             }],
             tags: vec![Tag {
-                name: "v1.0".to_string(),
+                name: "v1.0".to_owned(),
                 commit: TagCommit {
-                    sha: "abc123".to_string(),
+                    sha: "abc123".to_owned(),
                 },
             }],
             error: None,
         }
     }
 
+    #[must_use]
     pub fn with_error(mut self, error: GitHubServiceError) -> Self {
         self.error = Some(error);
         self
     }
 
+    #[must_use]
     pub fn with_activity_page(mut self, activity_page: ActivityPage) -> Self {
         self.activity_page = activity_page;
         self
@@ -868,7 +873,7 @@ mod tests {
         );
 
         let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, Some("token".to_string()));
+        let service = GitHubService::http_with_base_url(base_url, Some("token".to_owned()));
         let owner = service
             .get_owner("octocat")
             .await

@@ -14,11 +14,10 @@ pub async fn panic_recovery_middleware(request: Request, next: Next) -> Response
             let panic_message = panic_payload_message(payload.as_ref());
             let backtrace = Backtrace::force_capture().to_string();
 
-            match panic_message {
-                Some(panic_message) => {
-                    tracing::error!(panic_message, backtrace, "request panicked")
-                }
-                None => tracing::error!(backtrace, "request panicked"),
+            if let Some(panic_message) = panic_message {
+                tracing::error!(panic_message, backtrace, "request panicked")
+            } else {
+                tracing::error!(backtrace, "request panicked")
             }
 
             problem_response(

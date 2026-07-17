@@ -82,11 +82,12 @@ pub enum ProfileServiceError {
 }
 
 impl ProfileService {
+    #[must_use]
     pub fn firestore(config: &AppConfig) -> Self {
         let project_id = config
             .resolved_google_project_id()
             .unwrap_or(config.firebase_project_id.as_str())
-            .to_string();
+            .to_owned();
 
         Self {
             inner: Arc::new(ProfileServiceInner::Firestore(Box::new(
@@ -98,6 +99,7 @@ impl ProfileService {
         }
     }
 
+    #[must_use]
     pub fn mock(mock: MockProfileService) -> Self {
         Self {
             inner: Arc::new(ProfileServiceInner::Mock(Box::new(mock))),
@@ -142,11 +144,13 @@ impl ProfileService {
 }
 
 impl MockProfileService {
+    #[must_use]
     pub fn with_error(mut self, error: ProfileServiceError) -> Self {
         self.error = Some(error);
         self
     }
 
+    #[must_use]
     pub fn with_profile(self, profile: Profile) -> Self {
         self.profiles
             .lock()
@@ -173,7 +177,7 @@ impl MockProfileService {
         }
 
         let profile = build_profile(user_id, params);
-        profiles.insert(user_id.to_string(), profile.clone());
+        profiles.insert(user_id.to_owned(), profile.clone());
         Ok(profile)
     }
 
@@ -393,7 +397,7 @@ enum ProfileMutation {
 fn build_profile(user_id: &str, params: CreateProfileParams) -> Profile {
     let timestamp = timestamp_now();
     Profile {
-        id: user_id.to_string(),
+        id: user_id.to_owned(),
         firstname: params.firstname,
         lastname: params.lastname,
         email: normalize_email(&params.email),
@@ -427,21 +431,21 @@ fn apply_update(profile: &mut Profile, params: UpdateProfileParams) {
 fn update_field_mask(params: &UpdateProfileParams) -> Vec<String> {
     let mut fields = Vec::new();
     if params.firstname.is_some() {
-        fields.push("firstname".to_string());
+        fields.push("firstname".to_owned());
     }
     if params.lastname.is_some() {
-        fields.push("lastname".to_string());
+        fields.push("lastname".to_owned());
     }
     if params.email.is_some() {
-        fields.push("email".to_string());
+        fields.push("email".to_owned());
     }
     if params.phone_number.is_some() {
-        fields.push("phoneNumber".to_string());
+        fields.push("phoneNumber".to_owned());
     }
     if params.marketing.is_some() {
-        fields.push("marketing".to_string());
+        fields.push("marketing".to_owned());
     }
-    fields.push("updatedAt".to_string());
+    fields.push("updatedAt".to_owned());
     fields
 }
 
@@ -450,7 +454,7 @@ fn normalize_email(value: &str) -> String {
 }
 
 fn normalize_phone(value: &str) -> String {
-    value.trim().to_string()
+    value.trim().to_owned()
 }
 
 fn timestamp_now() -> String {
@@ -500,10 +504,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "  JOHN@EXAMPLE.COM  ".to_string(),
-                    phone_number: "  +358401234567  ".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "  JOHN@EXAMPLE.COM  ".to_owned(),
+                    phone_number: "  +358401234567  ".to_owned(),
                     marketing: true,
                     terms: true,
                 },
@@ -523,10 +527,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "john@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "john@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -538,10 +542,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "Jane".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "jane@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "Jane".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "jane@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -559,10 +563,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "john@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "john@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -574,7 +578,7 @@ mod tests {
             .update(
                 "user-123",
                 UpdateProfileParams {
-                    firstname: Some("Jane".to_string()),
+                    firstname: Some("Jane".to_owned()),
                     marketing: Some(true),
                     ..UpdateProfileParams::default()
                 },

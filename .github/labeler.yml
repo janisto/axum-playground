@@ -4,26 +4,44 @@ app:
   - changed-files:
       - any-glob-to-any-file:
           - 'src/**'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
           - 'tests/**'
-          - 'Cargo.toml'
-          - 'Cargo.lock'
-          - 'Justfile'
-          - 'rust-toolchain.toml'
-          - 'deny.toml'
+
+functions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'functions/**'
 
 documentation:
   - changed-files:
       - any-glob-to-any-file:
           - 'README.md'
-          - 'plans/**'
+          - 'AGENTS.md'
+          - '.agents/**/*.md'
+          - '.github/**/*.md'
+          - 'functions/README.md'
 
-ci:
+tooling:
   - changed-files:
       - any-glob-to-any-file:
-          - '.github/**'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+          - 'Justfile'
+          - 'rust-toolchain.toml'
+          - 'deny.toml'
+          - '.clippy.toml'
           - 'Dockerfile'
           - '.dockerignore'
           - 'cloudbuild.yaml'
+
+github-actions:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/dependabot.yml'
 
 feature:
   - head-branch: ['^feature', 'feature']

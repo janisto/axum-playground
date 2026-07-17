@@ -1,3 +1,4 @@
+#[must_use]
 pub fn build_link_header(
     base_url: &str,
     query: &[(&str, &str)],
@@ -26,7 +27,7 @@ fn replace_cursor(query: &[(&str, &str)], cursor: &str) -> String {
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect::<Vec<_>>();
 
-    pairs.push(("cursor".to_string(), cursor.to_string()));
+    pairs.push(("cursor".to_owned(), cursor.to_owned()));
 
     serialize_query(&pairs)
 }

@@ -4,21 +4,22 @@ use axum::{
     Router,
     extract::{DefaultBodyLimit, Request},
     http::{HeaderName, Method, StatusCode, header},
-    middleware::{from_fn, from_fn_with_state},
+    middleware::from_fn,
     response::Response,
 };
+use axum_observability::ObservabilityLayer;
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     http::{health, v1},
     middleware::{
-        logging::request_logging_middleware, recover::panic_recovery_middleware,
-        request_id::request_id_middleware, security::security_headers_middleware,
+        recover::panic_recovery_middleware, security::security_headers_middleware,
         timeout::timeout_middleware,
     },
     problem::problem_response,
     state::AppState,
+    telemetry::observability_config,
 };
 
 const MAX_REQUEST_BODY_SIZE_BYTES: usize = 1024 * 1024;
@@ -46,6 +47,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
             HeaderName::from_static("x-csrf-token"),
             HeaderName::from_static("x-request-id"),
             HeaderName::from_static("traceparent"),
+            HeaderName::from_static("tracestate"),
         ])
         .expose_headers([
             header::LINK,
@@ -69,12 +71,8 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
         .method_not_allowed_fallback(method_not_allowed_handler)
         .layer(
             ServiceBuilder::new()
-                .layer(from_fn(request_id_middleware))
+                .layer(ObservabilityLayer::new(observability_config()))
                 .layer(from_fn(panic_recovery_middleware))
-                .layer(from_fn_with_state(
-                    state.clone(),
-                    request_logging_middleware,
-                ))
                 .layer(from_fn(security_headers_middleware))
                 .layer(cors_layer)
                 .layer(from_fn(timeout_middleware))

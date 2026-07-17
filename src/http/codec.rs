@@ -69,6 +69,7 @@ pub enum RequestBodyDecodeError {
 }
 
 impl RequestBodyDecodeError {
+    #[must_use]
     pub fn into_response(self, request_headers: &HeaderMap) -> Response {
         match self {
             Self::Invalid => problem_response(
@@ -147,6 +148,10 @@ where
     response
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "decoding is the ownership boundary for the buffered request body"
+)]
 pub fn decode_request_body<T>(
     request_headers: &HeaderMap,
     body: Bytes,
@@ -239,7 +244,7 @@ mod tests {
             StatusCode::OK,
             ResponseFormat(Representation::Json),
             &Payload {
-                message: "hello".to_string(),
+                message: "hello".to_owned(),
             },
         );
 
@@ -249,7 +254,7 @@ mod tests {
             Some(&HeaderValue::from_static("application/json"))
         );
 
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        let body = axum::body::to_bytes(response.into_body(), 1_024)
             .await
             .expect("body should be readable");
         assert_eq!(body, Bytes::from_static(br#"{"message":"hello"}"#));
@@ -312,7 +317,7 @@ mod tests {
         let mut payload = Vec::new();
         ciborium::into_writer(
             &Payload {
-                message: "cbor".to_string(),
+                message: "cbor".to_owned(),
             },
             &mut payload,
         )

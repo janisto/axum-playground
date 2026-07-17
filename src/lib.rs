@@ -1,3 +1,7 @@
+//! Reusable application composition and HTTP contracts for axum-playground.
+
+#![forbid(unsafe_code)]
+
 pub mod app;
 pub mod auth;
 pub mod config;

@@ -17,6 +17,7 @@ struct MediaRangeMatch {
     specificity: u8,
 }
 
+#[must_use]
 pub fn negotiate_api_representation(
     headers: &HeaderMap,
     allow_cbor: bool,
@@ -42,6 +43,7 @@ pub fn negotiate_api_representation(
     }
 }
 
+#[must_use]
 pub fn negotiate_problem_representation(headers: &HeaderMap) -> Representation {
     let accept = combined_accept_header(headers);
     let explicit_problem_json_quality = media_type_quality(&accept, PROBLEM_JSON_MEDIA_TYPE, true);
