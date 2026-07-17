@@ -15,7 +15,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 
 ### Features
 
-- Layered middleware architecture with security headers, CORS, panic recovery, timeouts, and [`axum-observability` v0.3.0](https://crates.io/crates/axum-observability/0.3.0) request correlation and terminal access logging
+- Layered middleware architecture with security headers, CORS, panic recovery, timeouts, and [`axum-observability` v1.0.0](https://crates.io/crates/axum-observability/1.0.0) request correlation and terminal access logging
 - Request-scoped W3C trace correlation via `traceparent`, falling back to the validated request ID when no valid trace context is present
 - GCP-shaped structured JSON logs on stdout with query-free request paths and no in-process cloud logging client
 - RFC 9457 Problem Details for JSON errors and the same data model encoded as generic CBOR

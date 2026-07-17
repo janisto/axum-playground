@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 axum = "0.8.9"
-axum-observability = "0.3.0"
+axum-observability = "1.0.0"
 base64 = "0.22.1"
 ciborium = "0.2.2"
 firestore = "0.49.0"
