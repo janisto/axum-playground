@@ -1,0 +1,4 @@
+interface:
+  display_name: "README Maintenance"
+  short_description: "Keep the Axum README accurate and concise"
+  default_prompt: "Use $readme-maintenance to audit README.md against the current Axum repository and update stale claims."

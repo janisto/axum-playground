@@ -77,7 +77,7 @@ async fn openapi_endpoint_serves_documented_routes() {
 }
 
 #[tokio::test]
-async fn swagger_ui_route_is_served_without_security_header_overlay() {
+async fn swagger_ui_route_is_served_with_security_headers() {
     let response = build_app(test_state())
         .oneshot(
             Request::builder()
@@ -90,5 +90,11 @@ async fn swagger_ui_route_is_served_without_security_header_overlay() {
         .expect("request should succeed");
 
     assert!(response.status().is_success() || response.status().is_redirection());
-    assert!(!response.headers().contains_key(header::X_FRAME_OPTIONS));
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_FRAME_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
 }

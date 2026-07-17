@@ -174,7 +174,13 @@ impl AuthVerifier {
     pub fn from_config(config: &AppConfig) -> Result<Self, StartupError> {
         let project_id = config.firebase_project_id.clone();
 
-        if config.firebase_auth_emulator_host.is_some() {
+        if let Some(host) = config.firebase_auth_emulator_host.as_deref() {
+            if !config.emulator_host_is_loopback(host) {
+                return Err(StartupError::UnsafeEmulatorHost {
+                    variable: "FIREBASE_AUTH_EMULATOR_HOST",
+                    host: host.to_owned(),
+                });
+            }
             return Ok(Self {
                 inner: Arc::new(AuthVerifierInner::Emulator(Box::new(
                     EmulatorAuthVerifier { project_id },
@@ -208,6 +214,7 @@ impl AuthVerifier {
         })
     }
 
+    #[must_use]
     pub fn mock(mock: MockAuthVerifier) -> Self {
         Self {
             inner: Arc::new(AuthVerifierInner::Mock(Box::new(mock))),
@@ -224,14 +231,17 @@ impl AuthVerifier {
 }
 
 impl MockAuthVerifier {
+    #[must_use]
     pub fn allow(user: FirebaseUser) -> Self {
         Self { user, error: None }
     }
 
+    #[must_use]
     pub fn test_user() -> Self {
         Self::allow(FirebaseUser::new("user-123", "test@example.com", true))
     }
 
+    #[must_use]
     pub fn with_error(mut self, error: AuthError) -> Self {
         self.error = Some(error);
         self
@@ -270,9 +280,9 @@ impl ProductionAuthVerifier {
             return Err(AuthError::UserDisabled);
         }
 
-        if let (Some(valid_since), Some(issued_at)) = (lookup.valid_since_epoch(), claims.iat)
-            && issued_at < valid_since
-        {
+        let valid_since = lookup.valid_since_epoch()?;
+        let auth_time = claims.auth_time.ok_or(AuthError::InvalidToken)?;
+        if token_is_revoked(valid_since, auth_time) {
             return Err(AuthError::TokenRevoked);
         }
 
@@ -363,7 +373,7 @@ impl IdentityPlatformLookupClient {
             .post(IDENTITY_LOOKUP_URL)
             .bearer_auth(access_token.token)
             .json(&IdentityLookupRequest {
-                local_id: vec![uid.to_string()],
+                local_id: vec![uid.to_owned()],
                 target_project_id: self.project_id.clone(),
             })
             .send()
@@ -388,8 +398,12 @@ impl IdentityPlatformLookupClient {
 }
 
 impl IdentityLookupUser {
-    fn valid_since_epoch(&self) -> Option<u64> {
-        self.valid_since.as_deref()?.parse().ok()
+    fn valid_since_epoch(&self) -> Result<u64, AuthError> {
+        self.valid_since
+            .as_deref()
+            .ok_or(AuthError::ServiceUnavailable)?
+            .parse()
+            .map_err(|_| AuthError::ServiceUnavailable)
     }
 }
 
@@ -406,8 +420,8 @@ impl FirebaseClaims {
 impl AudienceClaim {
     fn contains(&self, value: &str) -> bool {
         match self {
-            AudienceClaim::One(current) => current == value,
-            AudienceClaim::Many(current) => current.iter().any(|entry| entry == value),
+            Self::One(current) => current == value,
+            Self::Many(current) => current.iter().any(|entry| entry == value),
         }
     }
 }
@@ -427,7 +441,7 @@ pub fn extract_bearer_token(header_value: &str) -> Result<String, AuthError> {
         return Err(AuthError::InvalidAuthorization);
     }
 
-    Ok(parts[1].to_string())
+    Ok(parts[1].to_owned())
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
@@ -517,6 +531,14 @@ fn unix_timestamp_now() -> u64 {
         .as_secs()
 }
 
+fn token_is_revoked(valid_since: u64, auth_time: u64) -> bool {
+    auth_time < valid_since
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "jsonwebtoken passes owned errors through Result::map_err"
+)]
 fn map_jwt_error(error: JwtError) -> AuthError {
     match error.kind() {
         JwtErrorKind::ExpiredSignature => AuthError::TokenExpired,
@@ -556,6 +578,10 @@ fn service_unavailable_response(headers: &HeaderMap, detail: &str, retry_after: 
     response
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the extractor transfers ownership of its authentication failure"
+)]
 fn map_auth_error(headers: &HeaderMap, error: AuthError) -> Response {
     match error {
         AuthError::CertificateFetch => service_unavailable_response(
@@ -599,8 +625,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthError, EmulatorAuthVerifier, FirebaseUser, expected_issuer, extract_bearer_token,
+        AuthError, AuthVerifier, EmulatorAuthVerifier, FirebaseUser, IdentityLookupUser,
+        expected_issuer, extract_bearer_token, token_is_revoked,
     };
+    use crate::{config::AppConfig, error::StartupError};
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
@@ -630,10 +658,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auth_emulator_requires_a_local_environment_and_loopback_host() {
+        let mut config = test_config();
+        config.firebase_auth_emulator_host = Some("emulator.example.com:9099".to_owned());
+        assert!(matches!(
+            AuthVerifier::from_config(&config),
+            Err(StartupError::UnsafeEmulatorHost { .. })
+        ));
+
+        config.firebase_auth_emulator_host = Some("127.0.0.1:9099".to_owned());
+        config.app_environment = "production".to_owned();
+        assert!(matches!(
+            AuthVerifier::from_config(&config),
+            Err(StartupError::UnsafeEmulatorHost { .. })
+        ));
+
+        config.app_environment = "development".to_owned();
+        assert!(AuthVerifier::from_config(&config).is_ok());
+    }
+
+    #[test]
+    fn revocation_uses_auth_time_instead_of_token_issue_time() {
+        assert!(token_is_revoked(200, 100));
+        assert!(!token_is_revoked(200, 200));
+    }
+
+    #[test]
+    fn revocation_metadata_fails_closed_when_missing_or_malformed() {
+        let user = |valid_since: Option<&str>| IdentityLookupUser {
+            local_id: "user-123".to_owned(),
+            disabled: false,
+            valid_since: valid_since.map(ToOwned::to_owned),
+        };
+
+        assert_eq!(user(Some("200")).valid_since_epoch(), Ok(200));
+        assert_eq!(
+            user(None).valid_since_epoch(),
+            Err(AuthError::ServiceUnavailable)
+        );
+        assert_eq!(
+            user(Some("not-a-timestamp")).valid_since_epoch(),
+            Err(AuthError::ServiceUnavailable)
+        );
+    }
+
     #[tokio::test]
     async fn emulator_verifier_accepts_unsigned_tokens() {
         let verifier = EmulatorAuthVerifier {
-            project_id: "demo-test-project".to_string(),
+            project_id: "demo-test-project".to_owned(),
         };
         let now = super::unix_timestamp_now();
 
@@ -664,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn emulator_verifier_rejects_expired_tokens() {
         let verifier = EmulatorAuthVerifier {
-            project_id: "demo-test-project".to_string(),
+            project_id: "demo-test-project".to_owned(),
         };
         let now = super::unix_timestamp_now();
 
@@ -690,11 +763,31 @@ mod tests {
         assert_eq!(error, AuthError::TokenExpired);
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the test helper consumes inline JSON fixtures"
+    )]
     fn unsigned_token(header: serde_json::Value, claims: serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&header).expect("header should serialize to JSON"));
         let claims = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("claims should serialize to JSON"));
         format!("{header}.{claims}.")
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            port: 8080,
+            firebase_project_id: "demo-test-project".to_owned(),
+            app_environment: "development".to_owned(),
+            github_token: None,
+            google_application_credentials: None,
+            firebase_auth_emulator_host: None,
+            firestore_emulator_host: None,
+            google_cloud_project: None,
+            gcp_project: None,
+            gcloud_project: None,
+            project_id: None,
+        }
     }
 }

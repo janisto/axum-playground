@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{FirestoreDb, FirestoreWritePrecondition, errors::FirestoreError};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -81,11 +82,12 @@ pub enum ProfileServiceError {
 }
 
 impl ProfileService {
+    #[must_use]
     pub fn firestore(config: &AppConfig) -> Self {
         let project_id = config
             .resolved_google_project_id()
             .unwrap_or(config.firebase_project_id.as_str())
-            .to_string();
+            .to_owned();
 
         Self {
             inner: Arc::new(ProfileServiceInner::Firestore(Box::new(
@@ -97,6 +99,7 @@ impl ProfileService {
         }
     }
 
+    #[must_use]
     pub fn mock(mock: MockProfileService) -> Self {
         Self {
             inner: Arc::new(ProfileServiceInner::Mock(Box::new(mock))),
@@ -141,11 +144,13 @@ impl ProfileService {
 }
 
 impl MockProfileService {
+    #[must_use]
     pub fn with_error(mut self, error: ProfileServiceError) -> Self {
         self.error = Some(error);
         self
     }
 
+    #[must_use]
     pub fn with_profile(self, profile: Profile) -> Self {
         self.profiles
             .lock()
@@ -172,7 +177,7 @@ impl MockProfileService {
         }
 
         let profile = build_profile(user_id, params);
-        profiles.insert(user_id.to_string(), profile.clone());
+        profiles.insert(user_id.to_owned(), profile.clone());
         Ok(profile)
     }
 
@@ -236,39 +241,43 @@ impl FirestoreProfileStore {
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         let profile = build_profile(user_id, params);
+        let document_id = profile_document_id(user_id);
         let db = self.db().await?;
 
         match db
             .fluent()
             .insert()
             .into(PROFILES_COLLECTION)
-            .document_id(user_id)
+            .document_id(&document_id)
             .object(&profile)
             .execute::<Profile>()
             .await
         {
             Ok(created) => {
-                info!(
-                    operation = "profile.create",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.create", "profile mutation succeeded");
                 Ok(created)
             }
             Err(error) => {
-                warn!(operation = "profile.create", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Create))
+                let error = map_firestore_error(error, ProfileMutation::Create);
+                warn!(
+                    operation = "profile.create",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
 
     async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
         let profile: Option<Profile> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
             .obj()
-            .one(user_id)
+            .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileMutation::Get))?;
 
@@ -281,12 +290,13 @@ impl FirestoreProfileStore {
         params: UpdateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
         let profile: Option<Profile> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
             .obj()
-            .one(user_id)
+            .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileMutation::Update))?;
 
@@ -303,47 +313,52 @@ impl FirestoreProfileStore {
             .fields(fields.iter().map(String::as_str))
             .in_col(PROFILES_COLLECTION)
             .precondition(FirestoreWritePrecondition::Exists(true))
-            .document_id(user_id)
+            .document_id(&document_id)
             .object(&profile)
             .execute::<Profile>()
             .await
         {
             Ok(updated) => {
-                info!(
-                    operation = "profile.update",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.update", "profile mutation succeeded");
                 Ok(updated)
             }
             Err(error) => {
-                warn!(operation = "profile.update", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Update))
+                let error = map_firestore_error(error, ProfileMutation::Update);
+                warn!(
+                    operation = "profile.update",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
 
     async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         let db = self.db().await?;
+        let document_id = profile_document_id(user_id);
 
         match db
             .fluent()
             .delete()
             .from(PROFILES_COLLECTION)
-            .document_id(user_id)
+            .document_id(&document_id)
             .precondition(FirestoreWritePrecondition::Exists(true))
             .execute()
             .await
         {
             Ok(_) => {
-                info!(
-                    operation = "profile.delete",
-                    user_id, "profile mutation succeeded"
-                );
+                info!(operation = "profile.delete", "profile mutation succeeded");
                 Ok(())
             }
             Err(error) => {
-                warn!(operation = "profile.delete", user_id, error = %error, "profile mutation failed");
-                Err(map_firestore_error(error, ProfileMutation::Delete))
+                let error = map_firestore_error(error, ProfileMutation::Delete);
+                warn!(
+                    operation = "profile.delete",
+                    reason = profile_error_kind(&error),
+                    "profile mutation failed"
+                );
+                Err(error)
             }
         }
     }
@@ -359,6 +374,18 @@ impl FirestoreProfileStore {
     }
 }
 
+fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
+    match error {
+        ProfileServiceError::NotFound => "not_found",
+        ProfileServiceError::AlreadyExists => "already_exists",
+        ProfileServiceError::Backend(_) => "backend",
+    }
+}
+
+fn profile_document_id(user_id: &str) -> String {
+    format!("uid_{}", URL_SAFE_NO_PAD.encode(user_id))
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ProfileMutation {
     Create,
@@ -370,7 +397,7 @@ enum ProfileMutation {
 fn build_profile(user_id: &str, params: CreateProfileParams) -> Profile {
     let timestamp = timestamp_now();
     Profile {
-        id: user_id.to_string(),
+        id: user_id.to_owned(),
         firstname: params.firstname,
         lastname: params.lastname,
         email: normalize_email(&params.email),
@@ -404,21 +431,21 @@ fn apply_update(profile: &mut Profile, params: UpdateProfileParams) {
 fn update_field_mask(params: &UpdateProfileParams) -> Vec<String> {
     let mut fields = Vec::new();
     if params.firstname.is_some() {
-        fields.push("firstname".to_string());
+        fields.push("firstname".to_owned());
     }
     if params.lastname.is_some() {
-        fields.push("lastname".to_string());
+        fields.push("lastname".to_owned());
     }
     if params.email.is_some() {
-        fields.push("email".to_string());
+        fields.push("email".to_owned());
     }
     if params.phone_number.is_some() {
-        fields.push("phoneNumber".to_string());
+        fields.push("phoneNumber".to_owned());
     }
     if params.marketing.is_some() {
-        fields.push("marketing".to_string());
+        fields.push("marketing".to_owned());
     }
-    fields.push("updatedAt".to_string());
+    fields.push("updatedAt".to_owned());
     fields
 }
 
@@ -427,7 +454,7 @@ fn normalize_email(value: &str) -> String {
 }
 
 fn normalize_phone(value: &str) -> String {
-    value.trim().to_string()
+    value.trim().to_owned()
 }
 
 fn timestamp_now() -> String {
@@ -452,8 +479,23 @@ fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> Prof
 mod tests {
     use super::{
         CreateProfileParams, MockProfileService, ProfileService, ProfileServiceError,
-        UpdateProfileParams,
+        UpdateProfileParams, profile_document_id,
     };
+
+    #[test]
+    fn firestore_document_id_safely_encodes_opaque_firebase_uids() {
+        assert_eq!(profile_document_id("tenant/user"), "uid_dGVuYW50L3VzZXI");
+        assert_eq!(profile_document_id("."), "uid_Lg");
+        assert_eq!(profile_document_id(".."), "uid_Li4");
+
+        for user_id in ["tenant/user", ".", "..", "\u{ffff}"] {
+            let document_id = profile_document_id(user_id);
+            assert!(!document_id.contains('/'));
+            assert_ne!(document_id, ".");
+            assert_ne!(document_id, "..");
+            assert!(!document_id.starts_with("__"));
+        }
+    }
 
     #[tokio::test]
     async fn mock_service_normalizes_email_and_phone() {
@@ -462,10 +504,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "  JOHN@EXAMPLE.COM  ".to_string(),
-                    phone_number: "  +358401234567  ".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "  JOHN@EXAMPLE.COM  ".to_owned(),
+                    phone_number: "  +358401234567  ".to_owned(),
                     marketing: true,
                     terms: true,
                 },
@@ -485,10 +527,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "john@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "john@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -500,10 +542,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "Jane".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "jane@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "Jane".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "jane@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -521,10 +563,10 @@ mod tests {
             .create(
                 "user-123",
                 CreateProfileParams {
-                    firstname: "John".to_string(),
-                    lastname: "Doe".to_string(),
-                    email: "john@example.com".to_string(),
-                    phone_number: "+358401234567".to_string(),
+                    firstname: "John".to_owned(),
+                    lastname: "Doe".to_owned(),
+                    email: "john@example.com".to_owned(),
+                    phone_number: "+358401234567".to_owned(),
                     marketing: false,
                     terms: true,
                 },
@@ -536,7 +578,7 @@ mod tests {
             .update(
                 "user-123",
                 UpdateProfileParams {
-                    firstname: Some("Jane".to_string()),
+                    firstname: Some("Jane".to_owned()),
                     marketing: Some(true),
                     ..UpdateProfileParams::default()
                 },

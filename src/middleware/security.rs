@@ -5,19 +5,8 @@ use axum::{
     response::Response,
 };
 
-const DOCS_UI_PREFIXES: &[&str] = &["/api-docs"];
-
 pub async fn security_headers_middleware(request: Request, next: Next) -> Response {
-    let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
-
-    if DOCS_UI_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-    {
-        return response;
-    }
-
     let headers = response.headers_mut();
     set_header_if_missing(
         headers,

@@ -29,7 +29,7 @@ fn authorized_json_request(method: Method, uri: &str, body: &str) -> Request<Bod
         .uri(uri)
         .header(header::AUTHORIZATION, "Bearer valid-token")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
+        .body(Body::from(body.to_owned()))
         .expect("request should build")
 }
 
@@ -222,6 +222,28 @@ async fn profile_validation_and_conflict_errors_map_correctly() {
 
     assert_eq!(create.status(), StatusCode::CREATED);
 
+    let null_patch = build_app(state.clone())
+        .oneshot(authorized_json_request(
+            Method::PATCH,
+            "/v1/profile",
+            r#"{"firstname":null,"marketing":true}"#,
+        ))
+        .await
+        .expect("request should succeed");
+    assert_eq!(null_patch.status(), StatusCode::BAD_REQUEST);
+
+    let unchanged = build_app(state.clone())
+        .oneshot(authorized_request(
+            Method::GET,
+            "/v1/profile",
+            Body::empty(),
+        ))
+        .await
+        .expect("request should succeed");
+    let unchanged: Profile = read_json_body(unchanged).await;
+    assert_eq!(unchanged.firstname, "John");
+    assert!(!unchanged.marketing);
+
     let duplicate = build_app(state.clone())
         .oneshot(authorized_json_request(
             Method::POST,
@@ -270,11 +292,33 @@ async fn profile_auth_certificate_fetch_failure_returns_503() {
 }
 
 #[tokio::test]
+async fn profile_auth_lookup_failure_returns_503_without_retry_hint() {
+    let state = test_state_with_auth_and_profile(
+        axum_playground::AuthVerifier::mock(
+            MockAuthVerifier::test_user().with_error(AuthError::ServiceUnavailable),
+        ),
+        ProfileService::mock(MockProfileService::default()),
+    );
+
+    let response = build_app(state)
+        .oneshot(authorized_request(
+            Method::GET,
+            "/v1/profile",
+            Body::empty(),
+        ))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers().get(header::RETRY_AFTER), None);
+}
+
+#[tokio::test]
 async fn profile_backend_errors_return_500() {
     let state = test_state_with_auth_and_profile(
         axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
         ProfileService::mock(MockProfileService::default().with_error(
-            ProfileServiceError::Backend("unexpected database error".to_string()),
+            ProfileServiceError::Backend("unexpected database error".to_owned()),
         )),
     );
 
@@ -304,6 +348,63 @@ async fn openapi_includes_profile_path() {
         .expect("request should succeed");
 
     let body = read_text_body(response).await;
-    assert!(body.contains("\"/v1/profile\""));
-    assert!(body.contains("application/cbor"));
+    let document: serde_json::Value =
+        serde_json::from_str(&body).expect("OpenAPI document should be JSON");
+    let post = &document["paths"]["/v1/profile"]["post"];
+
+    assert_eq!(post["security"][0]["bearerAuth"], serde_json::json!([]));
+    assert_eq!(
+        document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
+        "bearer"
+    );
+    assert_eq!(
+        post["requestBody"]["content"]
+            .as_object()
+            .expect("request content should be an object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["application/cbor", "application/json"]
+    );
+
+    let create_schema = &document["components"]["schemas"]["CreateProfileBody"];
+    assert_eq!(
+        create_schema["required"],
+        serde_json::json!(["firstname", "lastname", "email", "phoneNumber", "terms"])
+    );
+    assert_eq!(create_schema["properties"]["firstname"]["type"], "string");
+    assert_eq!(
+        create_schema["properties"]["phoneNumber"]["pattern"],
+        r"^\+[1-9][0-9]{6,14}$"
+    );
+    assert_eq!(
+        create_schema["properties"]["terms"]["enum"],
+        serde_json::json!([true])
+    );
+
+    let update_schema = &document["components"]["schemas"]["UpdateProfileBody"];
+    assert!(update_schema.get("required").is_none());
+    assert_eq!(update_schema["properties"]["firstname"]["type"], "string");
+
+    for method in ["get", "post", "patch", "delete"] {
+        let responses = &document["paths"]["/v1/profile"][method]["responses"];
+        assert_eq!(
+            responses["401"]["$ref"],
+            "#/components/responses/UnauthorizedProblemResponse"
+        );
+        assert_eq!(
+            responses["503"]["$ref"],
+            "#/components/responses/AuthenticationUnavailableProblemResponse"
+        );
+    }
+    assert_eq!(
+        document["components"]["responses"]["UnauthorizedProblemResponse"]["headers"]["WWW-Authenticate"]
+            ["schema"]["type"],
+        "string"
+    );
+    assert_eq!(
+        document["components"]["responses"]["AuthenticationUnavailableProblemResponse"]["headers"]
+            ["Retry-After"]["schema"]["type"],
+        "string"
+    );
 }

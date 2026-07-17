@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::Query,
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
     routing::get,
@@ -11,9 +10,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    http::codec::success_response_with_headers,
+    http::{
+        codec::{ResponseFormat, success_response_with_headers},
+        extract::ProblemQuery,
+    },
     pagination::{cursor::decode_cursor, paginate},
-    problem::problem_response,
+    problem::{ProblemResponse, problem_response},
     state::AppState,
 };
 
@@ -73,13 +75,15 @@ pub fn router() -> Router<Arc<AppState>> {
             (ItemsListData = "application/json"),
             (ItemsListData = "application/cbor")
         )),
-        (status = 400, description = "Cursor validation failure"),
-        (status = 422, description = "Query validation failure")
+        (status = 400, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse)
     )
 )]
 pub async fn list_items_handler(
+    format: ResponseFormat,
     headers: HeaderMap,
-    Query(query): Query<ItemsListQuery>,
+    ProblemQuery(query): ProblemQuery<ItemsListQuery>,
 ) -> Response {
     if let Some(limit) = query.limit
         && (limit <= 0 || limit > MAX_LIMIT)
@@ -101,11 +105,8 @@ pub async fn list_items_handler(
         );
     }
 
-    let cursor = match decode_cursor(query.cursor.as_deref().unwrap_or_default()) {
-        Ok(cursor) => cursor,
-        Err(_) => {
-            return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
-        }
+    let Ok(cursor) = decode_cursor(query.cursor.as_deref().unwrap_or_default()) else {
+        return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
     };
 
     if !cursor.kind.is_empty() && cursor.kind != ITEM_CURSOR_KIND {
@@ -134,7 +135,7 @@ pub async fn list_items_handler(
     let query_pairs = query
         .category
         .iter()
-        .map(|category| ("category".to_string(), category.clone()))
+        .map(|category| ("category".to_owned(), category.clone()))
         .collect::<Vec<_>>();
     let page = paginate(
         &filtered_items,
@@ -155,7 +156,7 @@ pub async fn list_items_handler(
 
     success_response_with_headers(
         StatusCode::OK,
-        &headers,
+        format,
         &ItemsListData {
             items: page.items,
             total: page.total,
@@ -456,12 +457,12 @@ fn item(
     description: &str,
 ) -> Item {
     Item {
-        id: id.to_string(),
-        name: name.to_string(),
-        category: category.to_string(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        category: category.to_owned(),
         price,
         in_stock,
-        created_at: created_at.to_string(),
-        description: description.to_string(),
+        created_at: created_at.to_owned(),
+        description: description.to_owned(),
     }
 }

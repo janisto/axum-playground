@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use axum::{Json, Router, routing::get};
-use utoipa::OpenApi;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{Http, HttpAuthScheme, SecurityScheme},
+};
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::{
@@ -18,14 +21,17 @@ use crate::{
             profile::{
                 __path_create_profile_handler, __path_delete_profile_handler,
                 __path_get_profile_handler, __path_update_profile_handler,
+                AuthenticationUnavailableProblemResponse, UnauthorizedProblemResponse,
             },
         },
     },
+    problem::{ProblemDetails, ProblemFieldError, ProblemResponse},
     state::AppState,
 };
 
 #[derive(OpenApi)]
-#[openapi(paths(
+#[openapi(
+paths(
     health_handler,
     get_hello_handler,
     create_hello_handler,
@@ -40,8 +46,31 @@ use crate::{
     list_github_repo_activity_handler,
     get_github_repo_languages_handler,
     list_github_repo_tags_handler
-))]
+),
+components(
+    schemas(ProblemDetails, ProblemFieldError),
+    responses(
+        ProblemResponse,
+        UnauthorizedProblemResponse,
+        AuthenticationUnavailableProblemResponse
+    )
+),
+modifiers(&SecurityAddon)
+)]
 struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearerAuth",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
+        }
+    }
+}
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/openapi", get(openapi_handler))

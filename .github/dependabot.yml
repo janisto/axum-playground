@@ -2,10 +2,13 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
+    versioning-strategy: "lockfile-only"
     schedule:
       interval: "quarterly"
       time: "08:00"
       timezone: "Europe/Helsinki"
+    cooldown:
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:
@@ -17,11 +20,6 @@ updates:
         update-types:
           - "patch"
           - "minor"
-      major-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "major"
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -29,6 +27,8 @@ updates:
       interval: "quarterly"
       time: "08:30"
       timezone: "Europe/Helsinki"
+    cooldown:
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:
@@ -52,6 +52,8 @@ updates:
       interval: "quarterly"
       time: "09:00"
       timezone: "Europe/Helsinki"
+    cooldown:
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:

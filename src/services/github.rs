@@ -1,7 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, Error as _},
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use utoipa::ToSchema;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
@@ -98,14 +102,14 @@ pub struct ActivityPage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Activity {
     pub id: i64,
-    pub actor: String,
+    pub actor: Option<String>,
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub timestamp: String,
     #[serde(rename = "activityType")]
     pub activity_type: String,
     #[serde(rename = "actorAvatarUrl")]
-    pub actor_avatar_url: String,
+    pub actor_avatar_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
@@ -150,16 +154,18 @@ pub enum GitHubUpstreamErrorKind {
 }
 
 impl GitHubService {
+    #[must_use]
     pub fn http(token: Option<String>) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Http(HttpGitHubService {
                 client: Client::new(),
-                base_url: DEFAULT_BASE_URL.to_string(),
+                base_url: DEFAULT_BASE_URL.to_owned(),
                 token,
             })),
         }
     }
 
+    #[must_use]
     pub fn mock(mock: MockGitHubService) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Mock(Box::new(mock))),
@@ -239,47 +245,48 @@ impl GitHubService {
 }
 
 impl MockGitHubService {
+    #[must_use]
     pub fn demo() -> Self {
         Self {
             owner: Some(Owner {
-                login: "octocat".to_string(),
-                name: "The Octocat".to_string(),
-                avatar_url: "https://avatars.githubusercontent.com/u/583231".to_string(),
-                html_url: "https://github.com/octocat".to_string(),
+                login: "octocat".to_owned(),
+                name: "The Octocat".to_owned(),
+                avatar_url: "https://avatars.githubusercontent.com/u/583231".to_owned(),
+                html_url: "https://github.com/octocat".to_owned(),
                 bio: String::new(),
-                location: "San Francisco".to_string(),
-                blog: "https://github.blog".to_string(),
-                company: "@github".to_string(),
-                created_at: "2011-01-25T18:44:36Z".to_string(),
-                updated_at: "2024-06-01T00:00:00Z".to_string(),
+                location: "San Francisco".to_owned(),
+                blog: "https://github.blog".to_owned(),
+                company: "@github".to_owned(),
+                created_at: "2011-01-25T18:44:36Z".to_owned(),
+                updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }),
             repos: vec![RepoSummary {
-                name: "git-consortium".to_string(),
-                full_name: "octocat/git-consortium".to_string(),
-                description: "This repo is for demonstration purposes.".to_string(),
-                html_url: "https://github.com/octocat/git-consortium".to_string(),
-                language: "Ruby".to_string(),
+                name: "git-consortium".to_owned(),
+                full_name: "octocat/git-consortium".to_owned(),
+                description: "This repo is for demonstration purposes.".to_owned(),
+                html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                language: "Ruby".to_owned(),
                 stars: 16,
                 forks: 10,
                 open_issues: 0,
-                created_at: "2011-01-25T18:44:36Z".to_string(),
-                updated_at: "2024-06-01T00:00:00Z".to_string(),
+                created_at: "2011-01-25T18:44:36Z".to_owned(),
+                updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }],
             repo: Some(Repo {
                 repo_summary: RepoSummary {
-                    name: "git-consortium".to_string(),
-                    full_name: "octocat/git-consortium".to_string(),
-                    description: "This repo is for demonstration purposes.".to_string(),
-                    html_url: "https://github.com/octocat/git-consortium".to_string(),
-                    language: "Ruby".to_string(),
+                    name: "git-consortium".to_owned(),
+                    full_name: "octocat/git-consortium".to_owned(),
+                    description: "This repo is for demonstration purposes.".to_owned(),
+                    html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                    language: "Ruby".to_owned(),
                     stars: 16,
                     forks: 10,
                     open_issues: 0,
-                    created_at: "2011-01-25T18:44:36Z".to_string(),
-                    updated_at: "2024-06-01T00:00:00Z".to_string(),
+                    created_at: "2011-01-25T18:44:36Z".to_owned(),
+                    updated_at: "2024-06-01T00:00:00Z".to_owned(),
                 },
-                default_branch: "master".to_string(),
-                license: "MIT License".to_string(),
+                default_branch: "master".to_owned(),
+                license: "MIT License".to_owned(),
                 topics: Vec::new(),
                 archived: false,
                 disabled: false,
@@ -287,33 +294,37 @@ impl MockGitHubService {
             activity_page: ActivityPage {
                 activities: vec![Activity {
                     id: 1,
-                    actor: "octocat".to_string(),
-                    git_ref: "refs/heads/master".to_string(),
-                    timestamp: "2024-01-15T10:30:00Z".to_string(),
-                    activity_type: "push".to_string(),
-                    actor_avatar_url: "https://avatars.githubusercontent.com/u/583231".to_string(),
+                    actor: Some("octocat".to_owned()),
+                    git_ref: "refs/heads/master".to_owned(),
+                    timestamp: "2024-01-15T10:30:00Z".to_owned(),
+                    activity_type: "push".to_owned(),
+                    actor_avatar_url: Some(
+                        "https://avatars.githubusercontent.com/u/583231".to_owned(),
+                    ),
                 }],
                 next_cursor: String::new(),
             },
             languages: vec![Language {
-                name: "Ruby".to_string(),
+                name: "Ruby".to_owned(),
                 bytes: 6789,
             }],
             tags: vec![Tag {
-                name: "v1.0".to_string(),
+                name: "v1.0".to_owned(),
                 commit: TagCommit {
-                    sha: "abc123".to_string(),
+                    sha: "abc123".to_owned(),
                 },
             }],
             error: None,
         }
     }
 
+    #[must_use]
     pub fn with_error(mut self, error: GitHubServiceError) -> Self {
         self.error = Some(error);
         self
     }
 
+    #[must_use]
     pub fn with_activity_page(mut self, activity_page: ActivityPage) -> Self {
         self.activity_page = activity_page;
         self
@@ -413,7 +424,7 @@ impl MockGitHubService {
 impl HttpGitHubService {
     async fn get_owner(&self, owner: &str) -> Result<Owner, GitHubServiceError> {
         let payload: GitHubOwnerPayload = self
-            .send_json(self.client.get(self.url(&format!("/users/{owner}"))))
+            .send_json(self.client.get(self.url(&["users", owner])))
             .await?;
         Ok(payload.into_owner())
     }
@@ -422,7 +433,7 @@ impl HttpGitHubService {
         let payload: Vec<GitHubRepoSummaryPayload> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/users/{owner}/repos")))
+                    .get(self.url(&["users", owner, "repos"]))
                     .query(&[("per_page", LIST_LIMIT)]),
             )
             .await?;
@@ -434,7 +445,7 @@ impl HttpGitHubService {
 
     async fn get_repo(&self, owner: &str, repo: &str) -> Result<Repo, GitHubServiceError> {
         let payload: GitHubRepoPayload = self
-            .send_json(self.client.get(self.url(&format!("/repos/{owner}/{repo}"))))
+            .send_json(self.client.get(self.url(&["repos", owner, repo])))
             .await?;
         Ok(payload.into_repo())
     }
@@ -448,7 +459,7 @@ impl HttpGitHubService {
     ) -> Result<ActivityPage, GitHubServiceError> {
         let mut request = self
             .client
-            .get(self.url(&format!("/repos/{owner}/{repo}/activity")))
+            .get(self.url(&["repos", owner, repo, "activity"]))
             .query(&[("per_page", limit)]);
         if !after_cursor.is_empty() {
             request = request.query(&[("after", after_cursor)]);
@@ -460,10 +471,7 @@ impl HttpGitHubService {
             .get("link")
             .and_then(|value| value.to_str().ok())
             .and_then(extract_next_cursor);
-        let payload = response
-            .json::<Vec<GitHubActivityPayload>>()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))?;
+        let payload = decode_json::<Vec<GitHubActivityPayload>>(response).await?;
 
         Ok(ActivityPage {
             activities: payload
@@ -482,7 +490,7 @@ impl HttpGitHubService {
         let payload: BTreeMap<String, i64> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/repos/{owner}/{repo}/languages"))),
+                    .get(self.url(&["repos", owner, repo, "languages"])),
             )
             .await?;
 
@@ -503,7 +511,7 @@ impl HttpGitHubService {
         let payload: Vec<GitHubTagPayload> = self
             .send_json(
                 self.client
-                    .get(self.url(&format!("/repos/{owner}/{repo}/tags")))
+                    .get(self.url(&["repos", owner, repo, "tags"]))
                     .query(&[("per_page", LIST_LIMIT)]),
             )
             .await?;
@@ -519,10 +527,7 @@ impl HttpGitHubService {
         T: DeserializeOwned,
     {
         let response = self.send(request).await?;
-        response
-            .json::<T>()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))
+        decode_json(response).await
     }
 
     async fn send(
@@ -551,8 +556,14 @@ impl HttpGitHubService {
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    fn url(&self, segments: &[&str]) -> reqwest::Url {
+        let mut url =
+            reqwest::Url::parse(&self.base_url).expect("GitHub base URL should be an absolute URL");
+        url.path_segments_mut()
+            .expect("GitHub base URL should support path segments")
+            .pop_if_empty()
+            .extend(segments);
+        url
     }
 }
 
@@ -617,6 +628,38 @@ fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
         .map(ToOwned::to_owned)
 }
 
+async fn decode_json<T>(response: reqwest::Response) -> Result<T, GitHubServiceError>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status().as_u16();
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status)))
+}
+
+fn deserialize_http_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let url = reqwest::Url::parse(&value).map_err(D::Error::custom)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(D::Error::custom("expected an absolute HTTP(S) URL"));
+    }
+    Ok(value)
+}
+
+fn deserialize_rfc3339<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    OffsetDateTime::parse(&value, &Rfc3339).map_err(D::Error::custom)?;
+    Ok(value)
+}
+
 fn extract_next_cursor(link_header: &str) -> Option<String> {
     link_header.split(',').find_map(|part| {
         let part = part.trim();
@@ -637,13 +680,17 @@ fn extract_next_cursor(link_header: &str) -> Option<String> {
 struct GitHubOwnerPayload {
     login: String,
     name: Option<String>,
+    #[serde(deserialize_with = "deserialize_http_url")]
     avatar_url: String,
+    #[serde(deserialize_with = "deserialize_http_url")]
     html_url: String,
     bio: Option<String>,
     location: Option<String>,
     blog: Option<String>,
     company: Option<String>,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     created_at: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     updated_at: String,
 }
 
@@ -669,12 +716,15 @@ struct GitHubRepoSummaryPayload {
     name: String,
     full_name: String,
     description: Option<String>,
+    #[serde(deserialize_with = "deserialize_http_url")]
     html_url: String,
     language: Option<String>,
     stargazers_count: i32,
     forks_count: i32,
     open_issues_count: i32,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     created_at: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     updated_at: String,
 }
 
@@ -727,23 +777,35 @@ impl GitHubRepoPayload {
 #[derive(Debug, Deserialize)]
 struct GitHubActivityPayload {
     id: i64,
-    actor: String,
+    actor: Option<GitHubActivityActorPayload>,
     #[serde(rename = "ref")]
     git_ref: String,
+    #[serde(deserialize_with = "deserialize_rfc3339")]
     timestamp: String,
     activity_type: String,
-    actor_avatar_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubActivityActorPayload {
+    login: String,
+    #[serde(deserialize_with = "deserialize_http_url")]
+    avatar_url: String,
 }
 
 impl GitHubActivityPayload {
     fn into_activity(self) -> Activity {
+        let (actor, actor_avatar_url) = self
+            .actor
+            .map(|actor| (Some(actor.login), Some(actor.avatar_url)))
+            .unwrap_or((None, None));
+
         Activity {
             id: self.id,
-            actor: self.actor,
+            actor,
             git_ref: self.git_ref,
             timestamp: self.timestamp,
             activity_type: self.activity_type,
-            actor_avatar_url: self.actor_avatar_url,
+            actor_avatar_url,
         }
     }
 }
@@ -779,13 +841,16 @@ mod tests {
     use axum::{
         Json, Router,
         extract::Query,
-        http::{HeaderMap, StatusCode, header},
+        http::{HeaderMap, Response as HttpResponse, StatusCode, header},
         routing::get,
     };
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
-    use super::{GITHUB_ACCEPT, GitHubService, GitHubServiceError, GitHubUpstreamErrorKind};
+    use super::{
+        GITHUB_ACCEPT, GitHubActivityPayload, GitHubOwnerPayload, GitHubRepoPayload, GitHubService,
+        GitHubServiceError, GitHubServiceInner, GitHubUpstreamErrorKind, decode_json,
+    };
 
     async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -797,6 +862,115 @@ mod tests {
         });
 
         (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn http_service_encodes_untrusted_path_segments() {
+        let service = GitHubService::http_with_base_url("https://api.github.test", None);
+        let GitHubServiceInner::Http(service) = service.inner.as_ref() else {
+            panic!("expected HTTP service");
+        };
+
+        assert_eq!(
+            service.url(&["repos", "owner", "repo/name"]).as_str(),
+            "https://api.github.test/repos/owner/repo%2Fname"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_contract_failure_preserves_successful_http_status() {
+        let payload = json!({
+            "login": "octocat",
+            "name": "The Octocat",
+            "avatar_url": "javascript:alert(1)",
+            "html_url": "https://github.com/octocat",
+            "bio": "",
+            "location": "San Francisco",
+            "blog": "https://github.blog",
+            "company": "@github",
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z"
+        });
+        let response = reqwest::Response::from(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .body(serde_json::to_vec(&payload).expect("payload should serialize"))
+                .expect("response should build"),
+        );
+
+        let error = decode_json::<GitHubOwnerPayload>(response)
+            .await
+            .expect_err("non-HTTP avatar URL should violate the upstream contract");
+
+        assert_eq!(
+            error,
+            GitHubServiceError::Upstream(super::GitHubUpstreamError::upstream(200))
+        );
+    }
+
+    #[test]
+    fn upstream_payloads_reject_invalid_urls_and_timestamps() {
+        let repo_with_invalid_url = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_url).is_err());
+
+        let repo_with_invalid_timestamp = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "https://github.com/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "yesterday",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_timestamp).is_err());
+
+        let activity_with_invalid_actor_url = json!({
+            "id": 1,
+            "actor": { "login": "octocat", "avatar_url": "not a URL" },
+            "ref": "refs/heads/main",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "activity_type": "push"
+        });
+        assert!(
+            serde_json::from_value::<GitHubActivityPayload>(activity_with_invalid_actor_url)
+                .is_err()
+        );
+
+        let activity_with_invalid_timestamp = json!({
+            "id": 1,
+            "actor": null,
+            "ref": "refs/heads/main",
+            "timestamp": "2024-13-99",
+            "activity_type": "push"
+        });
+        assert!(
+            serde_json::from_value::<GitHubActivityPayload>(activity_with_invalid_timestamp)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -834,7 +1008,7 @@ mod tests {
         );
 
         let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, Some("token".to_string()));
+        let service = GitHubService::http_with_base_url(base_url, Some("token".to_owned()));
         let owner = service
             .get_owner("octocat")
             .await
@@ -901,11 +1075,20 @@ mod tests {
                     Json(json!([
                         {
                             "id": 1,
-                            "actor": "octocat",
+                            "actor": {
+                                "login": "octocat",
+                                "avatar_url": "https://avatars.githubusercontent.com/u/583231"
+                            },
                             "ref": "refs/heads/master",
                             "timestamp": "2024-01-15T10:30:00Z",
-                            "activity_type": "push",
-                            "actor_avatar_url": "https://avatars.githubusercontent.com/u/583231"
+                            "activity_type": "push"
+                        },
+                        {
+                            "id": 2,
+                            "actor": null,
+                            "ref": "refs/heads/deleted",
+                            "timestamp": "2024-01-15T11:30:00Z",
+                            "activity_type": "branch_deletion"
                         }
                     ])),
                 )
@@ -921,7 +1104,14 @@ mod tests {
         handle.abort();
 
         assert_eq!(page.next_cursor, "abc123");
-        assert_eq!(page.activities.len(), 1);
+        assert_eq!(page.activities.len(), 2);
+        assert_eq!(page.activities[0].actor.as_deref(), Some("octocat"));
+        assert_eq!(
+            page.activities[0].actor_avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/583231")
+        );
+        assert_eq!(page.activities[1].actor, None);
+        assert_eq!(page.activities[1].actor_avatar_url, None);
     }
 
     #[tokio::test]

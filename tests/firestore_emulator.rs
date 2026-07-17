@@ -7,6 +7,7 @@ use axum_playground::{
 const EMULATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const EMULATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PROJECT_ID: &str = "demo-test-project";
+const USER_ID: &str = "tenant/user";
 
 #[tokio::test]
 async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured() {
@@ -22,12 +23,12 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
 
     let created = service
         .create(
-            "user-123",
+            USER_ID,
             CreateProfileParams {
-                firstname: "John".to_string(),
-                lastname: "Doe".to_string(),
-                email: "JOHN@EXAMPLE.COM".to_string(),
-                phone_number: " +358401234567 ".to_string(),
+                firstname: "John".to_owned(),
+                lastname: "Doe".to_owned(),
+                email: "JOHN@EXAMPLE.COM".to_owned(),
+                phone_number: " +358401234567 ".to_owned(),
                 marketing: true,
                 terms: true,
             },
@@ -37,15 +38,16 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
 
     assert_eq!(created.email, "john@example.com");
     assert_eq!(created.phone_number, "+358401234567");
+    assert_eq!(created.id, USER_ID);
 
     let duplicate = service
         .create(
-            "user-123",
+            USER_ID,
             CreateProfileParams {
-                firstname: "Jane".to_string(),
-                lastname: "Doe".to_string(),
-                email: "jane@example.com".to_string(),
-                phone_number: "+358401234567".to_string(),
+                firstname: "Jane".to_owned(),
+                lastname: "Doe".to_owned(),
+                email: "jane@example.com".to_owned(),
+                phone_number: "+358401234567".to_owned(),
                 marketing: false,
                 terms: true,
             },
@@ -55,17 +57,17 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
     assert_eq!(duplicate, ProfileServiceError::AlreadyExists);
 
     let fetched = service
-        .get("user-123")
+        .get(USER_ID)
         .await
         .expect("get should succeed against emulator");
     assert_eq!(fetched.firstname, "John");
 
     let updated = service
         .update(
-            "user-123",
+            USER_ID,
             UpdateProfileParams {
-                firstname: Some("Jane".to_string()),
-                email: Some("UPDATED@EXAMPLE.COM".to_string()),
+                firstname: Some("Jane".to_owned()),
+                email: Some("UPDATED@EXAMPLE.COM".to_owned()),
                 marketing: Some(false),
                 ..UpdateProfileParams::default()
             },
@@ -78,12 +80,12 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
     assert!(!updated.marketing);
 
     service
-        .delete("user-123")
+        .delete(USER_ID)
         .await
         .expect("delete should succeed against emulator");
 
     let missing = service
-        .get("user-123")
+        .get(USER_ID)
         .await
         .expect_err("deleted profile should not be found");
     assert_eq!(missing, ProfileServiceError::NotFound);
@@ -94,13 +96,13 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
 fn emulator_config() -> AppConfig {
     AppConfig {
         port: 8080,
-        firebase_project_id: PROJECT_ID.to_string(),
-        app_environment: "test-firestore-emulator".to_string(),
+        firebase_project_id: PROJECT_ID.to_owned(),
+        app_environment: "test-firestore-emulator".to_owned(),
         github_token: None,
         google_application_credentials: None,
         firebase_auth_emulator_host: None,
         firestore_emulator_host: emulator_host(),
-        google_cloud_project: Some(PROJECT_ID.to_string()),
+        google_cloud_project: Some(PROJECT_ID.to_owned()),
         gcp_project: None,
         gcloud_project: None,
         project_id: None,

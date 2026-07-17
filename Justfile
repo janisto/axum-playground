@@ -19,7 +19,15 @@ docker-build:
 run:
     cargo run --locked
 
-alias install := download
+[group('lifecycle')]
+install:
+    cargo fetch --locked
+    cargo install --locked cargo-nextest --version 0.9.140
+    cargo install --locked cargo-llvm-cov --version 0.8.7
+    cargo install --locked cargo-deny --version 0.20.2
+    cargo install --locked cargo-audit --version 0.22.2
+    cargo install --locked cargo-sort --version 2.1.3
+    cargo install --locked cargo-machete --version 0.9.2
 
 [group('lifecycle')]
 download:
@@ -35,15 +43,28 @@ fmt:
 
 [group('qa')]
 fmt-check:
-    cargo fmt --all --check
+    cargo fmt --all -- --check
 
 [group('qa')]
 lint:
     cargo clippy --locked --all-targets --all-features -- -D warnings
 
-# Quality assurance: format, lint, build, and test
 [group('qa')]
-qa: fmt lint build test
+doc:
+    RUSTDOCFLAGS="-D rustdoc::all" cargo doc --locked --all-features --no-deps
+
+[group('qa')]
+sort-check:
+    cargo sort --check --grouped
+
+[group('qa')]
+unused-dependencies:
+    cargo machete
+
+[group('qa')]
+workflow-check:
+    actionlint
+    zizmor --offline .
 
 [group('test')]
 test:
@@ -59,13 +80,23 @@ test-emulators:
 
 [group('qa')]
 coverage-lcov:
-    toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml); \
-    rustup run "$toolchain" cargo llvm-cov nextest --lcov --output-path coverage.lcov
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v brew >/dev/null && [[ "$(rustc --print sysroot)" == "$(brew --cellar rust)"/* ]]; then
+        export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
+        export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+    fi
+    cargo llvm-cov nextest --locked --lcov --output-path coverage.lcov
 
 [group('qa')]
 coverage-html:
-    toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml); \
-    rustup run "$toolchain" cargo llvm-cov nextest --html
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v brew >/dev/null && [[ "$(rustc --print sysroot)" == "$(brew --cellar rust)"/* ]]; then
+        export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
+        export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+    fi
+    cargo llvm-cov nextest --locked --html
 
 [group('qa')]
 deny:
@@ -76,20 +107,14 @@ audit:
     cargo audit
 
 [group('qa')]
-check:
-    just fmt-check
-    just lint
-    just test
+qa: workflow-check fmt-check sort-check unused-dependencies lint build test test-doc doc deny audit
+
+[group('qa')]
+check: qa
     just test-emulators
 
 [group('qa')]
-ci:
-    just fmt-check
-    just lint
-    just test
-    just test-doc
-    just deny
-    just audit
+ci: qa
     just docker-build
 
 [group('lifecycle')]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Axum Endpoint"
+  short_description: "Build safe Axum routes and API contracts"
+  default_prompt: "Use $axum-endpoint to implement the requested Axum route and its HTTP contract."

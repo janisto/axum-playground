@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pagination Endpoint"
+  short_description: "Build cursor-paginated Axum endpoints"
+  default_prompt: "Use $pagination-endpoint to implement the requested cursor-paginated Axum endpoint."

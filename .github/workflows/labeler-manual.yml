@@ -18,11 +18,12 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
   collect-prs:
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       pr_numbers: ${{ steps.get_prs.outputs.pr_numbers }}
@@ -61,6 +62,10 @@ jobs:
   label-prs-matrix:
     if: needs.collect-prs.outputs.pr_count != '0'
     needs: collect-prs
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 10

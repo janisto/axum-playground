@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    body::Bytes,
     http::{HeaderMap, StatusCode},
     response::Response,
     routing::get,
@@ -11,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    http::codec::{decode_request_body, success_response},
-    problem::problem_response,
+    http::codec::{BufferedBody, ResponseFormat, decode_request_body, success_response},
+    problem::{ProblemResponse, problem_response},
     state::AppState,
     validation::valid_name,
 };
@@ -39,15 +38,16 @@ pub fn router() -> Router<Arc<AppState>> {
         (status = 200, description = "Default greeting", content(
             (HelloData = "application/json"),
             (HelloData = "application/cbor")
-        ))
+        )),
+        (status = 406, response = ProblemResponse)
     )
 )]
-pub async fn get_hello_handler(headers: HeaderMap) -> Response {
+pub async fn get_hello_handler(format: ResponseFormat) -> Response {
     success_response(
         StatusCode::OK,
-        &headers,
+        format,
         &HelloData {
-            message: "Hello, World!".to_string(),
+            message: "Hello, World!".to_owned(),
         },
     )
 }
@@ -56,16 +56,27 @@ pub async fn get_hello_handler(headers: HeaderMap) -> Response {
     post,
     path = "/v1/hello",
     tag = "Hello",
-    request_body = HelloCreateBody,
+    request_body(content(
+        (HelloCreateBody = "application/json"),
+        (HelloCreateBody = "application/cbor")
+    )),
     responses(
         (status = 201, description = "Personalized greeting", content(
             (HelloData = "application/json"),
             (HelloData = "application/cbor")
         )),
-        (status = 422, description = "Validation failure")
+        (status = 400, response = ProblemResponse),
+        (status = 406, response = ProblemResponse),
+        (status = 413, response = ProblemResponse),
+        (status = 415, response = ProblemResponse),
+        (status = 422, response = ProblemResponse)
     )
 )]
-pub async fn create_hello_handler(headers: HeaderMap, body: Bytes) -> Response {
+pub async fn create_hello_handler(
+    format: ResponseFormat,
+    headers: HeaderMap,
+    BufferedBody(body): BufferedBody,
+) -> Response {
     let input = match decode_request_body::<HelloCreateBody>(&headers, body) {
         Ok(input) => input,
         Err(error) => return error.into_response(&headers),
@@ -81,7 +92,7 @@ pub async fn create_hello_handler(headers: HeaderMap, body: Bytes) -> Response {
 
     success_response(
         StatusCode::CREATED,
-        &headers,
+        format,
         &HelloData {
             message: format!("Hello, {}!", input.name),
         },
