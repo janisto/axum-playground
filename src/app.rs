@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Request},
+    extract::Request,
     http::{HeaderName, Method, StatusCode, header},
-    middleware::from_fn,
+    middleware::{Next, from_fn},
     response::Response,
 };
 use axum_observability::ObservabilityLayer;
 use tower::ServiceBuilder;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+};
 
 use crate::{
     http::{health, v1},
@@ -76,9 +79,30 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
                 .layer(from_fn(security_headers_middleware))
                 .layer(cors_layer)
                 .layer(from_fn(timeout_middleware))
-                .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_SIZE_BYTES)),
+                .layer(from_fn(payload_too_large_problem_middleware))
+                .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE_BYTES)),
         )
         .with_state(state)
+}
+
+async fn payload_too_large_problem_middleware(request: Request, next: Next) -> Response {
+    let request_headers = request.headers().clone();
+    let response = next.run(request).await;
+    let has_problem_content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| matches!(value, "application/problem+json" | "application/cbor"));
+
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE && !has_problem_content_type {
+        problem_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body is too large",
+            &request_headers,
+        )
+    } else {
+        response
+    }
 }
 
 async fn not_found_handler(request: Request) -> Response {

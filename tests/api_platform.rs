@@ -2,9 +2,9 @@ mod common;
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, to_bytes},
     http::{HeaderMap, Method, Request, StatusCode, header},
-    routing::get,
+    routing::{get, post},
 };
 use axum_observability::RequestContext;
 use axum_playground::{build_app, build_app_with_routes, problem::ProblemDetails};
@@ -26,6 +26,27 @@ async fn observability_context_handler(context: RequestContext, headers: HeaderM
             .get("x-request-id")
             .and_then(|value| value.to_str().ok()),
     }))
+}
+
+async fn raw_body_handler(request: axum::extract::Request) -> StatusCode {
+    match to_bytes(request.into_body(), usize::MAX).await {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(_) => StatusCode::PAYLOAD_TOO_LARGE,
+    }
+}
+
+async fn assert_payload_too_large_problem(response: axum::response::Response) {
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem: ProblemDetails = read_json_body(response).await;
+    assert_eq!(problem.status, StatusCode::PAYLOAD_TOO_LARGE.as_u16());
+    assert_eq!(problem.detail.as_deref(), Some("request body is too large"));
 }
 
 #[tokio::test]
@@ -98,6 +119,53 @@ async fn observability_context_replaces_duplicate_request_ids_once() {
     assert_eq!(body["requestHeader"], request_id);
     assert_eq!(body["correlationId"], request_id);
     assert!(body["traceId"].is_null());
+}
+
+#[tokio::test]
+async fn global_body_limit_covers_raw_body_consumers() {
+    const BODY_LIMIT: usize = 1024 * 1024;
+
+    let extra_routes = Router::new().route("/__raw-body", post(raw_body_handler));
+    let app = build_app_with_routes(test_state(), extra_routes);
+
+    let at_limit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/__raw-body")
+                .body(Body::from(vec![b'x'; BODY_LIMIT]))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(at_limit.status(), StatusCode::NO_CONTENT);
+
+    let oversized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/__raw-body")
+                .body(Body::from(vec![b'x'; BODY_LIMIT + 1]))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_payload_too_large_problem(oversized).await;
+
+    let declared_oversized = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/__raw-body")
+                .header(header::CONTENT_LENGTH, BODY_LIMIT + 1)
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_payload_too_large_problem(declared_oversized).await;
 }
 
 #[tokio::test]

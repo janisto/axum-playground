@@ -159,11 +159,13 @@ pub fn decode_request_body<T>(
 where
     T: DeserializeOwned,
 {
+    let format = request_body_format(request_headers)?;
+
     if body.is_empty() {
         return Err(RequestBodyDecodeError::Invalid);
     }
 
-    match request_body_format(request_headers)? {
+    match format {
         Representation::Json => {
             serde_json::from_slice(&body).map_err(|_| RequestBodyDecodeError::Invalid)
         }

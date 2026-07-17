@@ -231,6 +231,43 @@ async fn post_hello_rejects_missing_or_unowned_content_types() {
 }
 
 #[tokio::test]
+async fn post_hello_validates_media_type_before_empty_body_syntax() {
+    for (content_type, expected_status, expected_detail) in [
+        (
+            "text/plain",
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported request media type",
+        ),
+        (
+            "application/json",
+            StatusCode::BAD_REQUEST,
+            "invalid request body",
+        ),
+    ] {
+        let response = build_app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/hello")
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), expected_status, "{content_type}");
+        let problem: ProblemDetails = read_json_body(response).await;
+        assert_eq!(problem.status, expected_status.as_u16(), "{content_type}");
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some(expected_detail),
+            "{content_type}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn post_hello_rejects_trailing_cbor_items_and_oversized_bodies() {
     let mut cbor_payload = Vec::new();
     ciborium::into_writer(&serde_json::json!({"name": "CBOR"}), &mut cbor_payload)
