@@ -193,21 +193,25 @@ pub async fn list_github_owner_repos_handler(
     ProblemPath(path): ProblemPath<OwnerPath>,
     ProblemQuery(query): ProblemQuery<PageQuery>,
 ) -> Response {
-    let (limit, page) = match resolve_page_query(&query, OWNER_REPOS_CURSOR_KIND) {
+    let (limit, current_page) = match resolve_page_query(&query, OWNER_REPOS_CURSOR_KIND) {
         Ok(page) => page,
         Err(error) => return page_query_error_response(&headers, error),
     };
+    let upstream_page = current_page
+        .map(|page| page.to_string())
+        .unwrap_or_default();
 
     match state
         .github_service
-        .list_repos(&path.owner, limit, &page)
+        .list_repos(&path.owner, limit, &upstream_page)
         .await
     {
         Ok(page) => {
-            let extra_headers = next_page_headers(
+            let extra_headers = page_headers(
                 &format!("/v1/github/owners/{}/repos", path.owner),
                 limit,
                 OWNER_REPOS_CURSOR_KIND,
+                current_page,
                 &page.next_cursor,
             );
             success_response_with_headers(
@@ -305,8 +309,13 @@ pub async fn list_github_repo_activity_handler(
     {
         Ok(page) => {
             let base_path = format!("/v1/github/repos/{}/{}/activity", path.owner, path.repo);
-            let extra_headers =
-                next_page_headers(&base_path, limit, ACTIVITY_CURSOR_KIND, &page.next_cursor);
+            let extra_headers = page_headers(
+                &base_path,
+                limit,
+                ACTIVITY_CURSOR_KIND,
+                None,
+                &page.next_cursor,
+            );
 
             success_response_with_headers(
                 StatusCode::OK,
@@ -386,21 +395,25 @@ pub async fn list_github_repo_tags_handler(
     ProblemPath(path): ProblemPath<RepoPath>,
     ProblemQuery(query): ProblemQuery<PageQuery>,
 ) -> Response {
-    let (limit, page) = match resolve_page_query(&query, TAGS_CURSOR_KIND) {
+    let (limit, current_page) = match resolve_page_query(&query, TAGS_CURSOR_KIND) {
         Ok(page) => page,
         Err(error) => return page_query_error_response(&headers, error),
     };
+    let upstream_page = current_page
+        .map(|page| page.to_string())
+        .unwrap_or_default();
 
     match state
         .github_service
-        .list_tags(&path.owner, &path.repo, limit, &page)
+        .list_tags(&path.owner, &path.repo, limit, &upstream_page)
         .await
     {
         Ok(page) => {
-            let extra_headers = next_page_headers(
+            let extra_headers = page_headers(
                 &format!("/v1/github/repos/{}/{}/tags", path.owner, path.repo),
                 limit,
                 TAGS_CURSOR_KIND,
+                current_page,
                 &page.next_cursor,
             );
             success_response_with_headers(
@@ -420,7 +433,7 @@ pub async fn list_github_repo_tags_handler(
 fn resolve_page_query(
     query: &PageQuery,
     cursor_kind: &str,
-) -> Result<(usize, String), PageQueryError> {
+) -> Result<(usize, Option<u32>), PageQueryError> {
     let Some(limit) = resolve_limit(query.limit, DEFAULT_LIMIT, MAX_LIMIT) else {
         return Err(PageQueryError::InvalidLimit);
     };
@@ -428,10 +441,13 @@ fn resolve_page_query(
         .map_err(|_| PageQueryError::InvalidCursorFormat)?;
 
     if cursor.kind.is_empty() {
-        return Ok((limit, String::new()));
+        return Ok((limit, None));
     }
     if cursor.kind != cursor_kind {
         return Err(PageQueryError::CursorTypeMismatch);
+    }
+    if cursor.value.is_empty() {
+        return Ok((limit, None));
     }
     let page = cursor
         .value
@@ -440,7 +456,7 @@ fn resolve_page_query(
         .filter(|page| *page >= 2)
         .ok_or(PageQueryError::InvalidCursor)?;
 
-    Ok((limit, page.to_string()))
+    Ok((limit, Some(page)))
 }
 
 fn page_query_error_response(headers: &HeaderMap, error: PageQueryError) -> Response {
@@ -462,17 +478,31 @@ fn page_query_error_response(headers: &HeaderMap, error: PageQueryError) -> Resp
     }
 }
 
-fn next_page_headers(
+fn page_headers(
     base_path: &str,
     limit: usize,
     cursor_kind: &str,
+    current_page: Option<u32>,
     next_value: &str,
 ) -> Vec<(HeaderName, HeaderValue)> {
     let limit_string = limit.to_string();
     let query_pairs = [("limit", limit_string.as_str())];
     let next_cursor =
         (!next_value.is_empty()).then(|| Cursor::new(cursor_kind, next_value).encode());
-    let link_header = build_link_header(base_path, &query_pairs, next_cursor.as_deref(), None);
+    let prev_cursor = current_page.map(|page| {
+        let previous_page = if page > 2 {
+            (page - 1).to_string()
+        } else {
+            String::new()
+        };
+        Cursor::new(cursor_kind, previous_page).encode()
+    });
+    let link_header = build_link_header(
+        base_path,
+        &query_pairs,
+        next_cursor.as_deref(),
+        prev_cursor.as_deref(),
+    );
 
     if link_header.is_empty() {
         Vec::new()

@@ -274,6 +274,97 @@ async fn github_repositories_and_tags_expose_upstream_next_pages_as_opaque_links
 }
 
 #[tokio::test]
+async fn github_repository_and_tag_pages_expose_previous_links() {
+    let service = GitHubService::mock(
+        MockGitHubService::demo()
+            .with_repos_page(GitHubListPage {
+                items: Vec::new(),
+                next_cursor: "4".to_owned(),
+            })
+            .with_tags_page(GitHubListPage {
+                items: Vec::new(),
+                next_cursor: String::new(),
+            }),
+    );
+    let state = test_state_with_github_service(service);
+
+    let current_repos_cursor =
+        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "3").encode();
+    let repos_response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v1/github/owners/octocat/repos?limit=50&cursor={current_repos_cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let next_repos_cursor =
+        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "4").encode();
+    let previous_repos_cursor =
+        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "2").encode();
+    assert_eq!(
+        repos_response
+            .headers()
+            .get(header::LINK)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            format!(
+                "</v1/github/owners/octocat/repos?limit=50&cursor={next_repos_cursor}>; rel=\"next\", </v1/github/owners/octocat/repos?limit=50&cursor={previous_repos_cursor}>; rel=\"prev\""
+            )
+            .as_str()
+        )
+    );
+
+    let current_tags_cursor =
+        axum_playground::pagination::cursor::Cursor::new("gh-tags", "2").encode();
+    let tags_response = build_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={current_tags_cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let first_tags_cursor =
+        axum_playground::pagination::cursor::Cursor::new("gh-tags", "").encode();
+    assert_eq!(
+        tags_response
+            .headers()
+            .get(header::LINK)
+            .and_then(|value| value.to_str().ok()),
+        Some(
+            format!(
+                "</v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={first_tags_cursor}>; rel=\"prev\""
+            )
+            .as_str()
+        )
+    );
+
+    let first_tags_page = build_app(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={first_tags_cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(first_tags_page.status(), StatusCode::OK);
+    assert!(first_tags_page.headers().get(header::LINK).is_none());
+}
+
+#[tokio::test]
 async fn github_repository_and_tag_pagination_is_validated_before_service_calls() {
     let cursor = |kind: &str, value: &str| {
         axum_playground::pagination::cursor::Cursor::new(kind, value).encode()
