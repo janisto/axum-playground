@@ -10,13 +10,8 @@ pub(crate) fn observability_config() -> ObservabilityConfig {
 }
 
 pub fn init_tracing(app_environment: &str) -> Result<(), StartupError> {
-    let default_filter = match app_environment {
-        "production" => "info,axum_playground=info",
-        _ => "debug,axum_playground=debug",
-    };
-
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_filter(app_environment)));
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -24,4 +19,31 @@ pub fn init_tracing(app_environment: &str) -> Result<(), StartupError> {
         .try_init()?;
 
     Ok(())
+}
+
+fn default_filter(app_environment: &str) -> &'static str {
+    match app_environment {
+        "production" => "info,axum_playground=info",
+        _ => "debug,axum_playground=debug",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_filter, observability_config};
+
+    #[test]
+    fn production_uses_less_verbose_default_filter() {
+        assert_eq!(default_filter("production"), "info,axum_playground=info");
+        assert_eq!(default_filter("development"), "debug,axum_playground=debug");
+        assert_eq!(default_filter("test"), "debug,axum_playground=debug");
+    }
+
+    #[test]
+    fn observability_uses_gcp_fields_and_captures_raw_paths() {
+        let debug = format!("{:?}", observability_config());
+
+        assert!(debug.contains("field_convention: Gcp"));
+        assert!(debug.contains("raw_path: true"));
+    }
 }

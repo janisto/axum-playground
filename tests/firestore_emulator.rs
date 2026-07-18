@@ -10,10 +10,10 @@ const PROJECT_ID: &str = "demo-test-project";
 const USER_ID: &str = "tenant/user";
 
 #[tokio::test]
+#[ignore = "requires FIRESTORE_EMULATOR_HOST"]
 async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured() {
-    let Some(emulator_host) = emulator_host() else {
-        return;
-    };
+    let emulator_host =
+        emulator_host().expect("FIRESTORE_EMULATOR_HOST must be set for the emulator test");
 
     assert_emulator_reachable(&emulator_host).await;
 

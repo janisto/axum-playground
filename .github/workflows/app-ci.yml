@@ -38,7 +38,7 @@ jobs:
           key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-tests
 
       - name: Install test tools
-        run: cargo install --locked cargo-nextest --version 0.9.140
+        run: cargo install --locked cargo-nextest
 
       - name: Build
         run: cargo build --locked
@@ -72,8 +72,8 @@ jobs:
 
       - name: Install coverage tools
         run: |
-          cargo install --locked cargo-nextest --version 0.9.140
-          cargo install --locked cargo-llvm-cov --version 0.8.7
+          cargo install --locked cargo-nextest
+          cargo install --locked cargo-llvm-cov
 
       - name: Generate lcov report
         run: cargo llvm-cov nextest --locked --lcov --output-path coverage.lcov

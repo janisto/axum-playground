@@ -181,6 +181,7 @@ dependencies = [
  "ciborium",
  "firestore",
  "futures-util",
+ "gcloud-sdk",
  "google-cloud-auth",
  "jsonwebtoken",
  "reqwest",

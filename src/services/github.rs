@@ -850,6 +850,7 @@ mod tests {
     use super::{
         GITHUB_ACCEPT, GitHubActivityPayload, GitHubOwnerPayload, GitHubRepoPayload, GitHubService,
         GitHubServiceError, GitHubServiceInner, GitHubUpstreamErrorKind, decode_json,
+        map_http_error,
     };
 
     async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -929,6 +930,25 @@ mod tests {
         });
         assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_url).is_err());
 
+        let repo_with_non_http_url = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "ftp://example.com/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_non_http_url).is_err());
+
         let repo_with_invalid_timestamp = json!({
             "name": "git-consortium",
             "full_name": "octocat/git-consortium",
@@ -974,38 +994,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_service_parses_owner_and_sets_required_headers() {
-        let app = Router::new().route(
-            "/users/{owner}",
-            get(|headers: HeaderMap| async move {
-                assert_eq!(
-                    headers
-                        .get(header::ACCEPT)
-                        .and_then(|value| value.to_str().ok()),
-                    Some(GITHUB_ACCEPT)
-                );
-                assert!(headers.contains_key(header::USER_AGENT));
-                assert_eq!(
-                    headers
-                        .get("x-github-api-version")
-                        .and_then(|value| value.to_str().ok()),
-                    Some("2022-11-28")
-                );
+    async fn http_service_maps_owner_repository_and_tag_payloads() {
+        let app = Router::new()
+            .route(
+                "/users/{owner}",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(
+                        headers
+                            .get(header::ACCEPT)
+                            .and_then(|value| value.to_str().ok()),
+                        Some(GITHUB_ACCEPT)
+                    );
+                    assert!(headers.contains_key(header::USER_AGENT));
+                    assert_eq!(
+                        headers
+                            .get("x-github-api-version")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("2022-11-28")
+                    );
 
-                Json(json!({
-                    "login": "octocat",
-                    "name": "The Octocat",
-                    "avatar_url": "https://avatars.githubusercontent.com/u/583231",
-                    "html_url": "https://github.com/octocat",
-                    "bio": "",
-                    "location": "San Francisco",
-                    "blog": "https://github.blog",
-                    "company": "@github",
-                    "created_at": "2011-01-25T18:44:36Z",
-                    "updated_at": "2024-06-01T00:00:00Z"
-                }))
-            }),
-        );
+                    Json(json!({
+                        "login": "octocat",
+                        "name": "The Octocat",
+                        "avatar_url": "https://avatars.githubusercontent.com/u/583231",
+                        "html_url": "https://github.com/octocat",
+                        "bio": "",
+                        "location": "San Francisco",
+                        "blog": "https://github.blog",
+                        "company": "@github",
+                        "created_at": "2011-01-25T18:44:36Z",
+                        "updated_at": "2024-06-01T00:00:00Z"
+                    }))
+                }),
+            )
+            .route(
+                "/users/{owner}/repos",
+                get(
+                    |Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                        assert_eq!(query.get("per_page").map(String::as_str), Some("30"));
+                        Json(json!([{
+                            "name": "git-consortium",
+                            "full_name": "octocat/git-consortium",
+                            "description": null,
+                            "html_url": "https://github.com/octocat/git-consortium",
+                            "language": null,
+                            "stargazers_count": 10,
+                            "forks_count": 2,
+                            "open_issues_count": 1,
+                            "created_at": "2011-01-25T18:44:36Z",
+                            "updated_at": "2024-06-01T00:00:00Z"
+                        }]))
+                    },
+                ),
+            )
+            .route(
+                "/repos/{owner}/{repo}/tags",
+                get(|| async {
+                    Json(json!([{
+                        "name": "v1.0.0",
+                        "commit": { "sha": "abc123" }
+                    }]))
+                }),
+            );
 
         let (base_url, handle) = spawn_test_server(app).await;
         let service = GitHubService::http_with_base_url(base_url, Some("token".to_owned()));
@@ -1013,10 +1063,58 @@ mod tests {
             .get_owner("octocat")
             .await
             .expect("owner should load");
-        handle.abort();
-
         assert_eq!(owner.company, "@github");
         assert_eq!(owner.location, "San Francisco");
+
+        let repos = service
+            .list_repos("octocat")
+            .await
+            .expect("repositories should load");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "git-consortium");
+        assert_eq!(repos[0].description, "");
+
+        let tags = service
+            .list_tags("octocat", "git-consortium")
+            .await
+            .expect("tags should load");
+        handle.abort();
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "v1.0.0");
+        assert_eq!(tags[0].commit.sha, "abc123");
+    }
+
+    #[test]
+    fn http_error_mapping_distinguishes_not_found_forbidden_rate_limit_and_upstream() {
+        let headers = HeaderMap::new();
+        for (status, expected) in [
+            (StatusCode::NOT_FOUND, GitHubUpstreamErrorKind::NotFound),
+            (StatusCode::FORBIDDEN, GitHubUpstreamErrorKind::Forbidden),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                GitHubUpstreamErrorKind::RateLimited,
+            ),
+            (StatusCode::BAD_GATEWAY, GitHubUpstreamErrorKind::Upstream),
+        ] {
+            let GitHubServiceError::Upstream(error) = map_http_error(status, &headers) else {
+                panic!("HTTP failures should remain upstream errors");
+            };
+            assert_eq!(error.kind, expected);
+            assert_eq!(error.status, status.as_u16());
+        }
+
+        let mut rate_limit_headers = HeaderMap::new();
+        rate_limit_headers.insert(
+            "x-ratelimit-remaining",
+            "0".parse().expect("header value should parse"),
+        );
+        let GitHubServiceError::Upstream(error) =
+            map_http_error(StatusCode::FORBIDDEN, &rate_limit_headers)
+        else {
+            panic!("HTTP failures should remain upstream errors");
+        };
+        assert_eq!(error.kind, GitHubUpstreamErrorKind::RateLimited);
     }
 
     #[tokio::test]
@@ -1061,11 +1159,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_service_extracts_next_activity_cursor() {
+    async fn http_service_maps_live_activity_contract_and_extracts_next_cursor() {
         let app = Router::new().route(
             "/repos/{owner}/{repo}/activity",
             get(|Query(query): Query<std::collections::HashMap<String, String>>| async move {
                 assert_eq!(query.get("per_page").map(String::as_str), Some("10"));
+                assert_eq!(query.get("after"), None);
 
                 (
                     [(
@@ -1075,13 +1174,17 @@ mod tests {
                     Json(json!([
                         {
                             "id": 1,
+                            "node_id": "RA_kwDOExample",
                             "actor": {
                                 "login": "octocat",
-                                "avatar_url": "https://avatars.githubusercontent.com/u/583231"
+                                "avatar_url": "https://avatars.githubusercontent.com/u/583231",
+                                "type": "User"
                             },
                             "ref": "refs/heads/master",
                             "timestamp": "2024-01-15T10:30:00Z",
-                            "activity_type": "push"
+                            "activity_type": "push",
+                            "before": "1111111111111111111111111111111111111111",
+                            "after": "2222222222222222222222222222222222222222"
                         },
                         {
                             "id": 2,
@@ -1105,7 +1208,11 @@ mod tests {
 
         assert_eq!(page.next_cursor, "abc123");
         assert_eq!(page.activities.len(), 2);
+        assert_eq!(page.activities[0].id, 1);
         assert_eq!(page.activities[0].actor.as_deref(), Some("octocat"));
+        assert_eq!(page.activities[0].git_ref, "refs/heads/master");
+        assert_eq!(page.activities[0].timestamp, "2024-01-15T10:30:00Z");
+        assert_eq!(page.activities[0].activity_type, "push");
         assert_eq!(
             page.activities[0].actor_avatar_url.as_deref(),
             Some("https://avatars.githubusercontent.com/u/583231")

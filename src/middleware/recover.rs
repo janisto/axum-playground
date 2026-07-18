@@ -35,3 +35,17 @@ fn panic_payload_message(payload: &(dyn Any + Send)) -> Option<&str> {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::panic_payload_message;
+
+    #[test]
+    fn panic_payload_message_extracts_only_string_payloads() {
+        let owned = "owned panic".to_owned();
+
+        assert_eq!(panic_payload_message(&"static panic"), Some("static panic"));
+        assert_eq!(panic_payload_message(&owned), Some("owned panic"));
+        assert_eq!(panic_payload_message(&42_u32), None);
+    }
+}

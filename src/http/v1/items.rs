@@ -14,14 +14,14 @@ use crate::{
         codec::{ResponseFormat, success_response_with_headers},
         extract::ProblemQuery,
     },
-    pagination::{cursor::decode_cursor, paginate},
+    pagination::{cursor::decode_cursor, paginate, resolve_limit},
     problem::{ProblemResponse, problem_response},
     state::AppState,
 };
 
 const ITEM_CURSOR_KIND: &str = "item";
 const DEFAULT_LIMIT: usize = 20;
-const MAX_LIMIT: i64 = 100;
+const MAX_LIMIT: usize = 100;
 const ALLOWED_CATEGORIES: &[&str] = &[
     "electronics",
     "tools",
@@ -85,15 +85,13 @@ pub async fn list_items_handler(
     headers: HeaderMap,
     ProblemQuery(query): ProblemQuery<ItemsListQuery>,
 ) -> Response {
-    if let Some(limit) = query.limit
-        && (limit <= 0 || limit > MAX_LIMIT)
-    {
+    let Some(limit) = resolve_limit(query.limit, DEFAULT_LIMIT, MAX_LIMIT) else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",
             &headers,
         );
-    }
+    };
 
     if let Some(category) = query.category.as_deref()
         && !ALLOWED_CATEGORIES.contains(&category)
@@ -131,7 +129,6 @@ pub async fn list_items_handler(
         );
     }
 
-    let limit = default_limit(query.limit);
     let query_pairs = query
         .category
         .iter()
@@ -163,13 +160,6 @@ pub async fn list_items_handler(
         },
         extra_headers,
     )
-}
-
-fn default_limit(limit: Option<i64>) -> usize {
-    match limit {
-        Some(limit) if limit > 0 => limit as usize,
-        _ => DEFAULT_LIMIT,
-    }
 }
 
 fn all_items() -> Vec<Item> {

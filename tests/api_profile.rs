@@ -78,6 +78,55 @@ async fn profile_routes_require_bearer_auth() {
 }
 
 #[tokio::test]
+async fn profile_authentication_precedes_success_format_negotiation() {
+    for method in [Method::GET, Method::POST, Method::PATCH] {
+        for authorization in [None, Some("Basic dXNlcjpwYXNz")] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri("/v1/profile")
+                .header(header::ACCEPT, "text/html");
+            if let Some(authorization) = authorization {
+                request = request.header(header::AUTHORIZATION, authorization);
+            }
+
+            let response = build_app(test_state())
+                .oneshot(request.body(Body::empty()).expect("request should build"))
+                .await
+                .expect("request should succeed");
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} should authenticate before negotiating Accept"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer")
+            );
+        }
+    }
+
+    let authenticated = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/profile")
+                .header(header::AUTHORIZATION, "Bearer valid-token")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(authenticated.status(), StatusCode::NOT_ACCEPTABLE);
+    assert_eq!(authenticated.headers().get(header::WWW_AUTHENTICATE), None);
+}
+
+#[tokio::test]
 async fn profile_crud_flow_matches_contract() {
     let state = test_state();
 

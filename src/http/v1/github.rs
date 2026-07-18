@@ -18,6 +18,7 @@ use crate::{
     pagination::{
         cursor::{Cursor, decode_cursor},
         link::build_link_header,
+        resolve_limit,
     },
     problem::{ProblemResponse, problem_response},
     services::github::{
@@ -29,7 +30,7 @@ use crate::{
 
 const ACTIVITY_CURSOR_KIND: &str = "gh-activity";
 const DEFAULT_LIMIT: usize = 20;
-const MAX_LIMIT: i64 = 100;
+const MAX_LIMIT: usize = 100;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct OwnerPath {
@@ -247,15 +248,13 @@ pub async fn list_github_repo_activity_handler(
     ProblemPath(path): ProblemPath<RepoPath>,
     ProblemQuery(query): ProblemQuery<ActivityQuery>,
 ) -> Response {
-    if let Some(limit) = query.limit
-        && (limit <= 0 || limit > MAX_LIMIT)
-    {
+    let Some(limit) = resolve_limit(query.limit, DEFAULT_LIMIT, MAX_LIMIT) else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",
             &headers,
         );
-    }
+    };
 
     let Ok(cursor) = decode_cursor(query.cursor.as_deref().unwrap_or_default()) else {
         return problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", &headers);
@@ -264,11 +263,6 @@ pub async fn list_github_repo_activity_handler(
     if !cursor.kind.is_empty() && cursor.kind != ACTIVITY_CURSOR_KIND {
         return problem_response(StatusCode::BAD_REQUEST, "cursor type mismatch", &headers);
     }
-
-    let limit = match query.limit {
-        Some(limit) if limit > 0 => limit as usize,
-        _ => DEFAULT_LIMIT,
-    };
 
     match state
         .github_service

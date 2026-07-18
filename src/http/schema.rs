@@ -5,6 +5,14 @@ use axum::{
 };
 use serde_json::json;
 
+#[utoipa::path(
+    get,
+    path = "/schemas/ErrorModel.json",
+    tag = "Platform",
+    responses(
+        (status = 200, description = "Problem Details JSON Schema", content_type = "application/schema+json")
+    )
+)]
 pub async fn error_model_schema_handler() -> Response {
     let mut response = Json(json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -23,6 +23,24 @@ async fn every_local_openapi_reference_resolves() {
     assert_local_references_resolve(&document, &document);
 }
 
+#[tokio::test]
+async fn advertised_error_schema_route_is_documented() {
+    let response = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/openapi")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let document: Value = read_json_body(response).await;
+
+    let response = &document["paths"]["/schemas/ErrorModel.json"]["get"]["responses"]["200"];
+    assert_eq!(response["description"], "Problem Details JSON Schema");
+    assert!(response["content"].get("application/schema+json").is_some());
+}
+
 fn assert_local_references_resolve(value: &Value, document: &Value) {
     match value {
         Value::Object(object) => {

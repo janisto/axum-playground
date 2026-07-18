@@ -62,7 +62,15 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::{config::AppConfig, error::StartupError};
+    use crate::{
+        auth::{AuthVerifier, MockAuthVerifier},
+        config::AppConfig,
+        error::StartupError,
+        services::{
+            github::{GitHubService, MockGitHubService},
+            profile::{MockProfileService, ProfileService},
+        },
+    };
 
     use super::AppState;
 
@@ -89,5 +97,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn debug_output_keeps_service_state_opaque_and_config_secrets_redacted() {
+        let state = AppState::with_services(
+            AppConfig {
+                port: 8080,
+                firebase_project_id: "project".to_owned(),
+                app_environment: "test".to_owned(),
+                github_token: Some("secret-token".to_owned()),
+                google_application_credentials: Some("/secret/credentials.json".to_owned()),
+                firebase_auth_emulator_host: None,
+                firestore_emulator_host: None,
+                google_cloud_project: None,
+                gcp_project: None,
+                gcloud_project: None,
+                project_id: None,
+            },
+            GitHubService::mock(MockGitHubService::demo()),
+            AuthVerifier::mock(MockAuthVerifier::test_user()),
+            ProfileService::mock(MockProfileService::default()),
+        );
+
+        let output = format!("{state:?}");
+        assert!(output.starts_with("AppState { config: AppConfig"));
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("/secret/credentials.json"));
+        assert!(!output.contains("github_service"));
+        assert!(!output.contains("profile_service"));
     }
 }

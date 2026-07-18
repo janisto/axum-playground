@@ -7,11 +7,11 @@ use std::{
 use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as CredentialsBuilder};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, Validation,
+    Algorithm, DecodingKey, Header, Validation,
     dangerous::insecure_decode,
     decode, decode_header,
     errors::{Error as JwtError, ErrorKind as JwtErrorKind},
@@ -257,19 +257,13 @@ impl MockAuthVerifier {
 impl ProductionAuthVerifier {
     async fn verify(&self, token: &str) -> Result<FirebaseUser, AuthError> {
         let header = decode_header(token).map_err(map_jwt_error)?;
-        if header.alg != Algorithm::RS256 {
-            return Err(AuthError::InvalidToken);
-        }
-
-        let Some(kid) = header.kid.as_deref() else {
-            return Err(AuthError::InvalidToken);
-        };
+        let kid = rsa_key_id(&header)?;
 
         let jwk = self.jwk_for_kid(kid).await?;
         let key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
             .map_err(|_| AuthError::InvalidToken)?;
 
-        let claims = decode::<FirebaseClaims>(token, &key, &self.validation())
+        let claims = decode::<FirebaseClaims>(token, &key, &firebase_validation(&self.project_id))
             .map(|data| data.claims)
             .map_err(map_jwt_error)?;
 
@@ -289,17 +283,14 @@ impl ProductionAuthVerifier {
         Ok(claims.into_user())
     }
 
-    fn validation(&self) -> Validation {
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.leeway = JWT_LEEWAY_SECS;
-        validation.set_audience(&[self.project_id.as_str()]);
-        validation.set_issuer(&[expected_issuer(&self.project_id)]);
-        validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
-        validation
-    }
-
     async fn jwk_for_kid(&self, kid: &str) -> Result<GoogleJwk, AuthError> {
-        if let Some(cached) = self.cached_key(kid).await {
+        let cached = {
+            let cache = self.jwks_cache.read().await;
+            cache
+                .as_ref()
+                .and_then(|cache| cache.key_at(kid, Instant::now()))
+        };
+        if let Some(cached) = cached {
             return Ok(cached);
         }
 
@@ -310,9 +301,7 @@ impl ProductionAuthVerifier {
             .await
             .map_err(|_| AuthError::CertificateFetch)?;
 
-        if !response.status().is_success() {
-            return Err(AuthError::CertificateFetch);
-        }
+        require_successful_response(response.status(), AuthError::CertificateFetch)?;
 
         let ttl = cache_ttl(response.headers()).unwrap_or(DEFAULT_JWKS_TTL);
         let body = response
@@ -329,22 +318,27 @@ impl ProductionAuthVerifier {
             .collect::<HashMap<_, _>>();
 
         let key = keys.get(kid).cloned().ok_or(AuthError::InvalidToken)?;
-        let expires_at = Instant::now() + ttl;
-
         let mut cache = self.jwks_cache.write().await;
-        *cache = Some(CachedJwks { keys, expires_at });
+        *cache = Some(CachedJwks::new(keys, Instant::now(), ttl));
 
         Ok(key)
     }
+}
 
-    async fn cached_key(&self, kid: &str) -> Option<GoogleJwk> {
-        let cache = self.jwks_cache.read().await;
-        let cached = cache.as_ref()?;
-        if Instant::now() >= cached.expires_at {
+impl CachedJwks {
+    fn new(keys: HashMap<String, GoogleJwk>, now: Instant, ttl: Duration) -> Self {
+        Self {
+            keys,
+            expires_at: now + ttl,
+        }
+    }
+
+    fn key_at(&self, kid: &str, now: Instant) -> Option<GoogleJwk> {
+        if now >= self.expires_at {
             return None;
         }
 
-        cached.keys.get(kid).cloned()
+        self.keys.get(kid).cloned()
     }
 }
 
@@ -380,17 +374,20 @@ impl IdentityPlatformLookupClient {
             .await
             .map_err(|_| AuthError::ServiceUnavailable)?;
 
-        if !response.status().is_success() {
-            return Err(AuthError::ServiceUnavailable);
-        }
+        require_successful_response(response.status(), AuthError::ServiceUnavailable)?;
 
         let payload: IdentityLookupResponse = response
             .json()
             .await
             .map_err(|_| AuthError::ServiceUnavailable)?;
 
-        payload
-            .users
+        payload.user(uid)
+    }
+}
+
+impl IdentityLookupResponse {
+    fn user(self, uid: &str) -> Result<IdentityLookupUser, AuthError> {
+        self.users
             .into_iter()
             .find(|user| user.local_id == uid)
             .ok_or(AuthError::InvalidToken)
@@ -474,13 +471,15 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
     }
 }
 
-impl IntoResponse for AuthenticatedUser {
-    fn into_response(self) -> Response {
-        StatusCode::OK.into_response()
-    }
+fn validate_common_claims(claims: &FirebaseClaims, project_id: &str) -> Result<(), AuthError> {
+    validate_common_claims_at(claims, project_id, unix_timestamp_now())
 }
 
-fn validate_common_claims(claims: &FirebaseClaims, project_id: &str) -> Result<(), AuthError> {
+fn validate_common_claims_at(
+    claims: &FirebaseClaims,
+    project_id: &str,
+    now: u64,
+) -> Result<(), AuthError> {
     if claims.sub.trim().is_empty() {
         return Err(AuthError::InvalidToken);
     }
@@ -501,7 +500,6 @@ fn validate_common_claims(claims: &FirebaseClaims, project_id: &str) -> Result<(
         return Err(AuthError::InvalidToken);
     };
 
-    let now = unix_timestamp_now();
     if expiration.saturating_add(JWT_LEEWAY_SECS) < now {
         return Err(AuthError::TokenExpired);
     }
@@ -520,6 +518,23 @@ fn validate_common_claims(claims: &FirebaseClaims, project_id: &str) -> Result<(
     Ok(())
 }
 
+fn rsa_key_id(header: &Header) -> Result<&str, AuthError> {
+    if header.alg != Algorithm::RS256 {
+        return Err(AuthError::InvalidToken);
+    }
+
+    header.kid.as_deref().ok_or(AuthError::InvalidToken)
+}
+
+fn firebase_validation(project_id: &str) -> Validation {
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.leeway = JWT_LEEWAY_SECS;
+    validation.set_audience(&[project_id]);
+    validation.set_issuer(&[expected_issuer(project_id)]);
+    validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+    validation
+}
+
 fn expected_issuer(project_id: &str) -> String {
     format!("https://securetoken.google.com/{project_id}")
 }
@@ -533,6 +548,14 @@ fn unix_timestamp_now() -> u64 {
 
 fn token_is_revoked(valid_since: u64, auth_time: u64) -> bool {
     auth_time < valid_since
+}
+
+fn require_successful_response(status: StatusCode, error: AuthError) -> Result<(), AuthError> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 #[allow(
@@ -621,12 +644,25 @@ fn cache_ttl(headers: &HeaderMap) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        time::{Duration, Instant},
+    };
+
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use jsonwebtoken::{
+        Algorithm, Header,
+        errors::{Error as JwtError, ErrorKind as JwtErrorKind},
+    };
     use serde_json::json;
 
     use super::{
-        AuthError, AuthVerifier, EmulatorAuthVerifier, FirebaseUser, IdentityLookupUser,
-        expected_issuer, extract_bearer_token, token_is_revoked,
+        AudienceClaim, AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaims,
+        FirebaseUser, GoogleJwk, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS,
+        cache_ttl, categorize_auth_error, expected_issuer, extract_bearer_token,
+        firebase_validation, map_jwt_error, require_successful_response, rsa_key_id,
+        token_is_revoked, validate_common_claims_at,
     };
     use crate::{config::AppConfig, error::StartupError};
 
@@ -703,6 +739,243 @@ mod tests {
         );
     }
 
+    #[test]
+    fn production_header_policy_requires_rs256_and_a_key_id() {
+        let mut valid = Header::new(Algorithm::RS256);
+        valid.kid = Some("google-key".to_owned());
+        assert_eq!(rsa_key_id(&valid), Ok("google-key"));
+
+        assert_eq!(
+            rsa_key_id(&Header::new(Algorithm::RS256)),
+            Err(AuthError::InvalidToken)
+        );
+
+        let mut wrong_algorithm = Header::new(Algorithm::HS256);
+        wrong_algorithm.kid = Some("google-key".to_owned());
+        assert_eq!(rsa_key_id(&wrong_algorithm), Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn production_validation_pins_firebase_issuer_audience_and_claims() {
+        let validation = firebase_validation("demo-test-project");
+
+        assert_eq!(validation.algorithms, [Algorithm::RS256]);
+        assert_eq!(validation.leeway, JWT_LEEWAY_SECS);
+        assert_eq!(
+            validation
+                .aud
+                .as_ref()
+                .and_then(|values| values.get("demo-test-project")),
+            Some(&"demo-test-project".to_owned())
+        );
+        assert_eq!(
+            validation.iss.as_ref().and_then(|values| {
+                values.get("https://securetoken.google.com/demo-test-project")
+            }),
+            Some(&"https://securetoken.google.com/demo-test-project".to_owned())
+        );
+        assert_eq!(
+            validation.required_spec_claims,
+            ["aud", "exp", "iss", "sub"]
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn common_claim_validation_enforces_exact_time_issuer_and_audience_boundaries() {
+        let now = 10_000;
+        let mut claims = valid_claims(now);
+        claims.exp = Some(now - JWT_LEEWAY_SECS);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Ok(())
+        );
+
+        claims.exp = Some(now - JWT_LEEWAY_SECS - 1);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::TokenExpired)
+        );
+
+        claims = valid_claims(now);
+        claims.iat = Some(now + JWT_LEEWAY_SECS);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Ok(())
+        );
+
+        claims.iat = Some(now + JWT_LEEWAY_SECS + 1);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::InvalidToken)
+        );
+
+        claims = valid_claims(now);
+        claims.auth_time = Some(now + JWT_LEEWAY_SECS);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Ok(())
+        );
+
+        claims.auth_time = Some(now + JWT_LEEWAY_SECS + 1);
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::InvalidToken)
+        );
+
+        claims = valid_claims(now);
+        claims.iss = Some(expected_issuer("other-project"));
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::InvalidToken)
+        );
+
+        claims = valid_claims(now);
+        claims.aud = Some(AudienceClaim::Many(vec![
+            "other-project".to_owned(),
+            "demo-test-project".to_owned(),
+        ]));
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Ok(())
+        );
+
+        claims.aud = Some(AudienceClaim::Many(vec!["other-project".to_owned()]));
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn cached_jwks_requires_a_matching_unexpired_key() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(60);
+        let cache = CachedJwks::new(
+            HashMap::from([(
+                "google-key".to_owned(),
+                GoogleJwk {
+                    kid: "google-key".to_owned(),
+                    n: "modulus".to_owned(),
+                    e: "AQAB".to_owned(),
+                },
+            )]),
+            now,
+            ttl,
+        );
+
+        assert_eq!(cache.expires_at, now + ttl);
+        assert_eq!(
+            cache.key_at("google-key", now).map(|key| key.kid),
+            Some("google-key".to_owned())
+        );
+        assert_eq!(cache.key_at("missing-key", now).map(|key| key.kid), None);
+        assert_eq!(
+            cache
+                .key_at("google-key", cache.expires_at)
+                .map(|key| key.kid),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_lookup_selects_only_the_requested_user() {
+        let response = IdentityLookupResponse {
+            users: vec![
+                IdentityLookupUser {
+                    local_id: "other-user".to_owned(),
+                    disabled: false,
+                    valid_since: Some("100".to_owned()),
+                },
+                IdentityLookupUser {
+                    local_id: "user-123".to_owned(),
+                    disabled: true,
+                    valid_since: Some("200".to_owned()),
+                },
+            ],
+        };
+
+        let user = response
+            .user("user-123")
+            .expect("requested user should exist");
+        assert_eq!(user.local_id, "user-123");
+        assert!(user.disabled);
+        assert!(matches!(
+            IdentityLookupResponse { users: vec![] }.user("user-123"),
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[test]
+    fn jwks_cache_ttl_uses_max_age_and_rejects_invalid_directives() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=120, must-revalidate"),
+        );
+        assert_eq!(cache_ttl(&headers), Some(Duration::from_secs(120)));
+
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=invalid"),
+        );
+        assert_eq!(cache_ttl(&headers), None);
+    }
+
+    #[test]
+    fn external_auth_responses_must_have_success_statuses() {
+        assert_eq!(
+            require_successful_response(StatusCode::OK, AuthError::CertificateFetch),
+            Ok(())
+        );
+        assert_eq!(
+            require_successful_response(StatusCode::NO_CONTENT, AuthError::ServiceUnavailable),
+            Ok(())
+        );
+
+        for status in [
+            StatusCode::NOT_MODIFIED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(
+                require_successful_response(status, AuthError::CertificateFetch),
+                Err(AuthError::CertificateFetch),
+                "unexpected result for {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn jwt_error_mapping_preserves_expiration_as_a_distinct_failure() {
+        assert_eq!(
+            map_jwt_error(JwtError::from(JwtErrorKind::ExpiredSignature)),
+            AuthError::TokenExpired
+        );
+        assert_eq!(
+            map_jwt_error(JwtError::from(JwtErrorKind::InvalidSignature)),
+            AuthError::InvalidToken
+        );
+    }
+
+    #[test]
+    fn auth_log_categories_are_stable_and_non_sensitive() {
+        for (error, category) in [
+            (AuthError::MissingAuthorization, "no_token"),
+            (AuthError::InvalidAuthorization, "invalid_header"),
+            (AuthError::InvalidToken, "invalid_token"),
+            (AuthError::TokenExpired, "token_expired"),
+            (AuthError::TokenRevoked, "token_revoked"),
+            (AuthError::UserDisabled, "user_disabled"),
+            (AuthError::CertificateFetch, "certificate_fetch_failed"),
+            (AuthError::ServiceUnavailable, "service_unavailable"),
+        ] {
+            assert_eq!(categorize_auth_error(&error), category);
+        }
+    }
+
     #[tokio::test]
     async fn emulator_verifier_accepts_unsigned_tokens() {
         let verifier = EmulatorAuthVerifier {
@@ -773,6 +1046,19 @@ mod tests {
         let claims = URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).expect("claims should serialize to JSON"));
         format!("{header}.{claims}.")
+    }
+
+    fn valid_claims(now: u64) -> FirebaseClaims {
+        FirebaseClaims {
+            sub: "user-123".to_owned(),
+            email: Some("test@example.com".to_owned()),
+            email_verified: true,
+            exp: Some(now + 3600),
+            iat: Some(now),
+            auth_time: Some(now),
+            iss: Some(expected_issuer("demo-test-project")),
+            aud: Some(AudienceClaim::One("demo-test-project".to_owned())),
+        }
     }
 
     fn test_config() -> AppConfig {

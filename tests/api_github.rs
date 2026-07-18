@@ -311,6 +311,34 @@ async fn github_activity_uses_link_header_and_validates_cursor() {
         .await
         .expect("request should succeed");
     assert_eq!(negative_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let maximum_limit = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=100")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(maximum_limit.status(), StatusCode::OK);
+
+    let untyped_cursor =
+        axum_playground::pagination::cursor::Cursor::new("", "upstream-cursor").encode();
+    let untyped = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v1/github/repos/octocat/git-consortium/activity?cursor={untyped_cursor}"
+                ))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(untyped.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -346,6 +374,24 @@ async fn github_rejects_invalid_paths_and_query_syntax_before_service_calls() {
         let problem: ProblemDetails = read_json_body(response).await;
         assert_eq!(problem.status, StatusCode::BAD_REQUEST.as_u16());
     }
+}
+
+#[tokio::test]
+async fn github_path_validation_accepts_internal_hyphens() {
+    let service =
+        GitHubService::mock(MockGitHubService::demo().with_error(GitHubServiceError::NotFound));
+    let response = build_app(test_state_with_github_service(service))
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/github/owners/octo-cat")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

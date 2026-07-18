@@ -295,6 +295,18 @@ mod tests {
             decode_request_body::<Payload>(&headers, body),
             Err(RequestBodyDecodeError::UnsupportedMediaType)
         );
+
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/cbor; charset=utf-8"),
+        );
+        assert_eq!(
+            decode_request_body::<Payload>(
+                &headers,
+                Bytes::from_static(br#"{\"message\":\"json\"}"#),
+            ),
+            Err(RequestBodyDecodeError::UnsupportedMediaType)
+        );
     }
 
     #[test]

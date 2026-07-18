@@ -38,7 +38,7 @@ pub fn valid_phone_number(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_name, valid_phone_number};
+    use super::{valid_email, valid_name, valid_phone_number};
 
     #[test]
     fn name_validation_matches_length_rules() {
@@ -54,5 +54,12 @@ mod tests {
         assert!(!valid_phone_number("358401234567"));
         assert!(!valid_phone_number("+058401234567"));
         assert!(!valid_phone_number("+12"));
+    }
+
+    #[test]
+    fn email_validation_rejects_non_addresses() {
+        assert!(valid_email("user@example.com"));
+        assert!(!valid_email("not-an-email"));
+        assert!(!valid_email("@example.com"));
     }
 }

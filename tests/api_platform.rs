@@ -327,6 +327,57 @@ async fn cors_preflight_uses_api_defaults() {
 }
 
 #[tokio::test]
+async fn cors_exposes_authentication_and_method_contract_headers() {
+    let unauthorized = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/profile")
+                .header(header::ORIGIN, "https://example.com")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unauthorized
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+    let exposed_headers = unauthorized
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS response should list exposed headers");
+    assert!(exposed_headers.contains("www-authenticate"));
+
+    let method_not_allowed = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/health")
+                .header(header::ORIGIN, "https://example.com")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(method_not_allowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(method_not_allowed.headers().contains_key(header::ALLOW));
+    let exposed_headers = method_not_allowed
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS response should list exposed headers");
+    assert!(exposed_headers.contains("allow"));
+}
+
+#[tokio::test]
 async fn swagger_ui_receives_compatible_security_headers() {
     let response = build_app(test_state())
         .oneshot(

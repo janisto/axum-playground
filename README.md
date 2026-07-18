@@ -139,10 +139,16 @@ The actionlint formula installs ShellCheck, which actionlint uses for embedded
 shell scripts. This repository does not require pyflakes because its workflows
 do not contain embedded Python scripts.
 
-Run `just install` to fetch the locked dependency graph and install the pinned
-Cargo QA tools: cargo-nextest 0.9.140, cargo-llvm-cov 0.8.7,
-cargo-deny 0.20.2, cargo-audit 0.22.2, cargo-sort 2.1.3, and
-cargo-machete 0.9.2.
+Run `just install` to fetch the locked dependency graph and install the current
+Cargo maintenance and QA tools: cargo-edit, cargo-nextest, cargo-llvm-cov,
+cargo-deny, cargo-audit, cargo-mutants, cargo-sort, and cargo-machete. Cargo
+selects each tool's latest release and uses that release's packaged lockfile.
+
+`just update` is intentionally comprehensive for this application. It upgrades
+all direct dependency requirements to their latest releases, including
+SemVer-incompatible releases, refreshes all transitive dependencies in
+`Cargo.lock`, and fetches the resulting locked graph. Review the resulting
+manifest and source changes, then run `just qa` before committing them.
 
 ### Quick Start
 
@@ -230,9 +236,10 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | --- | --- |
 | `just build` | Build the application |
 | `just run` | Run the server |
-| `just install` | Fetch dependencies and install pinned Cargo QA tools |
+| `just install` | Fetch locked dependencies and install current Cargo maintenance and QA tools |
+| `just install-tools` | Install current Cargo maintenance and QA tools |
 | `just download` | Fetch locked Cargo dependencies |
-| `just update` | Update dependencies recorded in `Cargo.lock` within `Cargo.toml` constraints |
+| `just update` | Upgrade all direct requirements and refresh all locked transitive dependencies |
 | `just fmt` | Apply formatting |
 | `just fmt-check` | Verify formatting |
 | `just lint` | Run clippy with warnings denied |
@@ -244,6 +251,7 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
 | `just test-emulators` | Run the Firestore emulator test when configured |
+| `just mutations` | Run the explicit mutation-testing campaign |
 | `just check` | Run `just qa` plus optional emulator coverage |
 | `just ci` | Run `just qa` plus a container build |
 | `just coverage-lcov` | Generate `coverage.lcov` |
@@ -255,6 +263,33 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 
 Run `just --list` to see all available recipes.
 
+#### Mutation Testing
+
+Mutation testing is an explicit contributor campaign outside `just qa`. Run the
+full local campaign with four workers:
+
+```bash
+just mutations --jobs 4
+```
+
+While strengthening tests, reuse previously caught and unviable results:
+
+```bash
+just mutations --jobs 4 --iterate
+```
+
+`--iterate` is a development optimization, not a final gate. After the tests
+stabilize, rerun the full command without `--iterate`. Treat every unexplained
+miss and timeout as unresolved; add a behavioral test for a real contract gap
+rather than an artificial assertion for an equivalent transformation.
+
+Mutation campaigns can take a long time. Do not start a competing run while
+`cargo-mutants` holds the output lock. Results under `mutants.out` are ignored
+and rotated by cargo-mutants. Firestore persistence remains an emulator-backed
+boundary, so run `just test-emulators` with `FIRESTORE_EMULATOR_HOST` configured
+when profile storage behavior changes. Precise default-campaign exclusions are
+documented in `.cargo/mutants.toml`.
+
 #### Firebase Emulators
 
 Firestore integration tests require the Firestore emulator. Start it before running emulator-backed tests and export its host:
@@ -264,7 +299,11 @@ export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 just test-emulators
 ```
 
-The emulator test skips cleanly when `FIRESTORE_EMULATOR_HOST` is unset. GitHub Actions does not currently start Firebase emulators, so emulator-backed Firestore coverage is an explicit local gate rather than part of the hosted CI claim.
+The emulator test is explicitly ignored by the normal suite, and
+`just test-emulators` skips cleanly when `FIRESTORE_EMULATOR_HOST` is unset.
+GitHub Actions does not currently start Firebase emulators, so emulator-backed
+Firestore coverage is an explicit local gate rather than part of the hosted CI
+claim.
 
 ## Future Deployment
 

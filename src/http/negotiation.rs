@@ -203,7 +203,10 @@ fn parse_quality(value: &str) -> Option<f32> {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
 
-    use super::{Representation, negotiate_api_representation, negotiate_problem_representation};
+    use super::{
+        JSON_MEDIA_TYPE, Representation, media_type_quality, negotiate_api_representation,
+        negotiate_problem_representation, parse_quality,
+    };
 
     fn headers(accept: &'static str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -278,6 +281,18 @@ mod tests {
             None
         );
         assert_eq!(
+            negotiate_api_representation(&headers("application/json;profile=utf-8"), true),
+            None
+        );
+        assert_eq!(
+            negotiate_api_representation(&headers("application/json;charset=iso-8859-1"), true),
+            None
+        );
+        assert_eq!(
+            negotiate_api_representation(&headers("application/cbor;charset=utf-8"), true),
+            None
+        );
+        assert_eq!(
             negotiate_api_representation(&headers("application/json;charset=\"UTF-8\""), true),
             Some(Representation::Json)
         );
@@ -321,5 +336,69 @@ mod tests {
             negotiate_api_representation(&headers, true),
             Some(Representation::Cbor)
         );
+    }
+
+    #[test]
+    fn quality_selection_prefers_specific_ranges_and_parameters() {
+        assert_eq!(
+            media_type_quality(
+                "*/*;q=1, application/*;q=0.8, application/json;q=0.4",
+                JSON_MEDIA_TYPE,
+                false,
+            ),
+            Some(0.4)
+        );
+        assert_eq!(
+            media_type_quality(
+                "application/json;q=0.2, application/json;q=0.8",
+                JSON_MEDIA_TYPE,
+                false,
+            ),
+            Some(0.8)
+        );
+        assert_eq!(
+            media_type_quality(
+                "application/json;q=0.8, application/json;q=0.2",
+                JSON_MEDIA_TYPE,
+                false,
+            ),
+            Some(0.8)
+        );
+        assert_eq!(
+            media_type_quality(
+                "application/json;q=0.9, application/json;charset=utf-8;q=0.1",
+                JSON_MEDIA_TYPE,
+                false,
+            ),
+            Some(0.1)
+        );
+        assert_eq!(
+            media_type_quality(
+                "application/json;q=0.3, */*;charset=utf-8;q=0.9",
+                JSON_MEDIA_TYPE,
+                false,
+            ),
+            Some(0.3)
+        );
+    }
+
+    #[test]
+    fn quality_parser_enforces_the_rfc_upper_bound_and_precision() {
+        for (value, expected) in [
+            ("0", Some(0.0)),
+            ("0.123", Some(0.123)),
+            ("1", Some(1.0)),
+            ("1.000", Some(1.0)),
+            ("1.001", None),
+            ("1.1", None),
+            ("0.1234", None),
+            ("-0.1", None),
+        ] {
+            assert_eq!(
+                parse_quality(value),
+                expected,
+                "unexpected q-value result for {value}"
+            );
+        }
     }
 }

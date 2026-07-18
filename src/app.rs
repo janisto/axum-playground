@@ -53,9 +53,11 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
             HeaderName::from_static("tracestate"),
         ])
         .expose_headers([
+            header::ALLOW,
             header::LINK,
             header::LOCATION,
             header::RETRY_AFTER,
+            header::WWW_AUTHENTICATE,
             HeaderName::from_static("x-ratelimit-reset"),
             HeaderName::from_static("x-request-id"),
         ])
