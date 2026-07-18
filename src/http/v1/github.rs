@@ -29,6 +29,8 @@ use crate::{
 };
 
 const ACTIVITY_CURSOR_KIND: &str = "gh-activity";
+const OWNER_REPOS_CURSOR_KIND: &str = "gh-owner-repos";
+const TAGS_CURSOR_KIND: &str = "gh-tags";
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 
@@ -47,9 +49,17 @@ pub struct RepoPath {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ActivityQuery {
+pub struct PageQuery {
     pub cursor: Option<String>,
     pub limit: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PageQueryError {
+    InvalidLimit,
+    InvalidCursorFormat,
+    CursorTypeMismatch,
+    InvalidCursor,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -152,7 +162,7 @@ pub async fn get_github_owner_handler(
 ) -> Response {
     match state.github_service.get_owner(&path.owner).await {
         Ok(owner) => success_response(StatusCode::OK, format, &owner),
-        Err(error) => map_service_error(&headers, error),
+        Err(error) => map_service_error(&headers, "owner.get", error),
     }
 }
 
@@ -160,13 +170,18 @@ pub async fn get_github_owner_handler(
     get,
     path = "/v1/github/owners/{owner}/repos",
     tag = "GitHub",
-    params(("owner" = String, Path, description = "GitHub username")),
+    params(
+        ("owner" = String, Path, description = "GitHub username"),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from previous response"),
+        ("limit" = Option<i64>, Query, description = "Maximum items per page", minimum = 1, maximum = 100)
+    ),
     responses(
-        (status = 200, description = "GitHub repositories", content((OwnerReposResponse = "application/json"), (OwnerReposResponse = "application/cbor"))),
+        (status = 200, description = "GitHub repositories", headers(("Link" = String, description = "RFC 8288 pagination links")), content((OwnerReposResponse = "application/json"), (OwnerReposResponse = "application/cbor"))),
         (status = 400, response = ProblemResponse),
         (status = 403, response = ProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
         (status = 429, response = ProblemResponse),
         (status = 502, response = ProblemResponse)
     )
@@ -176,17 +191,36 @@ pub async fn list_github_owner_repos_handler(
     format: ResponseFormat,
     headers: HeaderMap,
     ProblemPath(path): ProblemPath<OwnerPath>,
+    ProblemQuery(query): ProblemQuery<PageQuery>,
 ) -> Response {
-    match state.github_service.list_repos(&path.owner).await {
-        Ok(repos) => success_response(
-            StatusCode::OK,
-            format,
-            &OwnerReposResponse {
-                count: repos.len(),
-                repos,
-            },
-        ),
-        Err(error) => map_service_error(&headers, error),
+    let (limit, page) = match resolve_page_query(&query, OWNER_REPOS_CURSOR_KIND) {
+        Ok(page) => page,
+        Err(error) => return page_query_error_response(&headers, error),
+    };
+
+    match state
+        .github_service
+        .list_repos(&path.owner, limit, &page)
+        .await
+    {
+        Ok(page) => {
+            let extra_headers = next_page_headers(
+                &format!("/v1/github/owners/{}/repos", path.owner),
+                limit,
+                OWNER_REPOS_CURSOR_KIND,
+                &page.next_cursor,
+            );
+            success_response_with_headers(
+                StatusCode::OK,
+                format,
+                &OwnerReposResponse {
+                    count: page.items.len(),
+                    repos: page.items,
+                },
+                extra_headers,
+            )
+        }
+        Err(error) => map_service_error(&headers, "owner.repos.list", error),
     }
 }
 
@@ -216,7 +250,7 @@ pub async fn get_github_repo_handler(
 ) -> Response {
     match state.github_service.get_repo(&path.owner, &path.repo).await {
         Ok(repo) => success_response(StatusCode::OK, format, &repo),
-        Err(error) => map_service_error(&headers, error),
+        Err(error) => map_service_error(&headers, "repo.get", error),
     }
 }
 
@@ -246,7 +280,7 @@ pub async fn list_github_repo_activity_handler(
     format: ResponseFormat,
     headers: HeaderMap,
     ProblemPath(path): ProblemPath<RepoPath>,
-    ProblemQuery(query): ProblemQuery<ActivityQuery>,
+    ProblemQuery(query): ProblemQuery<PageQuery>,
 ) -> Response {
     let Some(limit) = resolve_limit(query.limit, DEFAULT_LIMIT, MAX_LIMIT) else {
         return problem_response(
@@ -271,21 +305,8 @@ pub async fn list_github_repo_activity_handler(
     {
         Ok(page) => {
             let base_path = format!("/v1/github/repos/{}/{}/activity", path.owner, path.repo);
-            let limit_string = limit.to_string();
-            let query_pairs = [("limit", limit_string.as_str())];
-            let next_cursor = (!page.next_cursor.is_empty())
-                .then(|| Cursor::new(ACTIVITY_CURSOR_KIND, page.next_cursor).encode());
-            let link_header =
-                build_link_header(&base_path, &query_pairs, next_cursor.as_deref(), None);
-
-            let extra_headers = if !link_header.is_empty() {
-                vec![(
-                    header::LINK,
-                    HeaderValue::from_str(&link_header).expect("link header should be valid"),
-                )]
-            } else {
-                Vec::new()
-            };
+            let extra_headers =
+                next_page_headers(&base_path, limit, ACTIVITY_CURSOR_KIND, &page.next_cursor);
 
             success_response_with_headers(
                 StatusCode::OK,
@@ -297,7 +318,7 @@ pub async fn list_github_repo_activity_handler(
                 extra_headers,
             )
         }
-        Err(error) => map_service_error(&headers, error),
+        Err(error) => map_service_error(&headers, "repo.activity.list", error),
     }
 }
 
@@ -333,7 +354,7 @@ pub async fn get_github_repo_languages_handler(
         Ok(languages) => {
             success_response(StatusCode::OK, format, &RepoLanguagesResponse { languages })
         }
-        Err(error) => map_service_error(&headers, error),
+        Err(error) => map_service_error(&headers, "repo.languages.list", error),
     }
 }
 
@@ -343,14 +364,17 @@ pub async fn get_github_repo_languages_handler(
     tag = "GitHub",
     params(
         ("owner" = String, Path, description = "GitHub username"),
-        ("repo" = String, Path, description = "Repository name")
+        ("repo" = String, Path, description = "Repository name"),
+        ("cursor" = Option<String>, Query, description = "Opaque pagination cursor from previous response"),
+        ("limit" = Option<i64>, Query, description = "Maximum items per page", minimum = 1, maximum = 100)
     ),
     responses(
-        (status = 200, description = "Repository tags", content((RepoTagsResponse = "application/json"), (RepoTagsResponse = "application/cbor"))),
+        (status = 200, description = "Repository tags", headers(("Link" = String, description = "RFC 8288 pagination links")), content((RepoTagsResponse = "application/json"), (RepoTagsResponse = "application/cbor"))),
         (status = 400, response = ProblemResponse),
         (status = 403, response = ProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
         (status = 429, response = ProblemResponse),
         (status = 502, response = ProblemResponse)
     )
@@ -360,25 +384,135 @@ pub async fn list_github_repo_tags_handler(
     format: ResponseFormat,
     headers: HeaderMap,
     ProblemPath(path): ProblemPath<RepoPath>,
+    ProblemQuery(query): ProblemQuery<PageQuery>,
 ) -> Response {
+    let (limit, page) = match resolve_page_query(&query, TAGS_CURSOR_KIND) {
+        Ok(page) => page,
+        Err(error) => return page_query_error_response(&headers, error),
+    };
+
     match state
         .github_service
-        .list_tags(&path.owner, &path.repo)
+        .list_tags(&path.owner, &path.repo, limit, &page)
         .await
     {
-        Ok(tags) => success_response(
-            StatusCode::OK,
-            format,
-            &RepoTagsResponse {
-                count: tags.len(),
-                tags,
-            },
-        ),
-        Err(error) => map_service_error(&headers, error),
+        Ok(page) => {
+            let extra_headers = next_page_headers(
+                &format!("/v1/github/repos/{}/{}/tags", path.owner, path.repo),
+                limit,
+                TAGS_CURSOR_KIND,
+                &page.next_cursor,
+            );
+            success_response_with_headers(
+                StatusCode::OK,
+                format,
+                &RepoTagsResponse {
+                    count: page.items.len(),
+                    tags: page.items,
+                },
+                extra_headers,
+            )
+        }
+        Err(error) => map_service_error(&headers, "repo.tags.list", error),
     }
 }
 
-fn map_service_error(headers: &HeaderMap, error: GitHubServiceError) -> Response {
+fn resolve_page_query(
+    query: &PageQuery,
+    cursor_kind: &str,
+) -> Result<(usize, String), PageQueryError> {
+    let Some(limit) = resolve_limit(query.limit, DEFAULT_LIMIT, MAX_LIMIT) else {
+        return Err(PageQueryError::InvalidLimit);
+    };
+    let cursor = decode_cursor(query.cursor.as_deref().unwrap_or_default())
+        .map_err(|_| PageQueryError::InvalidCursorFormat)?;
+
+    if cursor.kind.is_empty() {
+        return Ok((limit, String::new()));
+    }
+    if cursor.kind != cursor_kind {
+        return Err(PageQueryError::CursorTypeMismatch);
+    }
+    let page = cursor
+        .value
+        .parse::<u32>()
+        .ok()
+        .filter(|page| *page >= 2)
+        .ok_or(PageQueryError::InvalidCursor)?;
+
+    Ok((limit, page.to_string()))
+}
+
+fn page_query_error_response(headers: &HeaderMap, error: PageQueryError) -> Response {
+    match error {
+        PageQueryError::InvalidLimit => problem_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation error",
+            headers,
+        ),
+        PageQueryError::InvalidCursorFormat => {
+            problem_response(StatusCode::BAD_REQUEST, "invalid cursor format", headers)
+        }
+        PageQueryError::CursorTypeMismatch => {
+            problem_response(StatusCode::BAD_REQUEST, "cursor type mismatch", headers)
+        }
+        PageQueryError::InvalidCursor => {
+            problem_response(StatusCode::BAD_REQUEST, "invalid cursor", headers)
+        }
+    }
+}
+
+fn next_page_headers(
+    base_path: &str,
+    limit: usize,
+    cursor_kind: &str,
+    next_value: &str,
+) -> Vec<(HeaderName, HeaderValue)> {
+    let limit_string = limit.to_string();
+    let query_pairs = [("limit", limit_string.as_str())];
+    let next_cursor =
+        (!next_value.is_empty()).then(|| Cursor::new(cursor_kind, next_value).encode());
+    let link_header = build_link_header(base_path, &query_pairs, next_cursor.as_deref(), None);
+
+    if link_header.is_empty() {
+        Vec::new()
+    } else {
+        vec![(
+            header::LINK,
+            HeaderValue::from_str(&link_header).expect("link header should be valid"),
+        )]
+    }
+}
+
+fn map_service_error(
+    headers: &HeaderMap,
+    operation: &'static str,
+    error: GitHubServiceError,
+) -> Response {
+    if let GitHubServiceError::Upstream(upstream) = &error {
+        let reason = match upstream.kind {
+            GitHubUpstreamErrorKind::NotFound => "not_found",
+            GitHubUpstreamErrorKind::Forbidden => "forbidden",
+            GitHubUpstreamErrorKind::RateLimited => "rate_limited",
+            GitHubUpstreamErrorKind::Upstream => "upstream",
+        };
+        if github_upstream_is_dependency_failure(&upstream.kind) {
+            tracing::warn!(
+                operation,
+                status = upstream.status,
+                reason,
+                "GitHub request failed"
+            );
+        } else {
+            tracing::debug!(
+                operation,
+                status = upstream.status,
+                reason,
+                "GitHub request rejected"
+            );
+        }
+    }
+
     match error {
         GitHubServiceError::NotFound => {
             problem_response(StatusCode::NOT_FOUND, "resource not found", headers)
@@ -424,5 +558,29 @@ fn map_service_error(headers: &HeaderMap, error: GitHubServiceError) -> Response
                 problem_response(StatusCode::BAD_GATEWAY, "upstream error", headers)
             }
         },
+    }
+}
+
+fn github_upstream_is_dependency_failure(kind: &GitHubUpstreamErrorKind) -> bool {
+    matches!(kind, GitHubUpstreamErrorKind::Upstream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::github_upstream_is_dependency_failure;
+    use crate::services::github::GitHubUpstreamErrorKind;
+
+    #[test]
+    fn only_uncontrolled_upstream_failures_use_dependency_failure_logging() {
+        for kind in [
+            GitHubUpstreamErrorKind::NotFound,
+            GitHubUpstreamErrorKind::Forbidden,
+            GitHubUpstreamErrorKind::RateLimited,
+        ] {
+            assert!(!github_upstream_is_dependency_failure(&kind));
+        }
+        assert!(github_upstream_is_dependency_failure(
+            &GitHubUpstreamErrorKind::Upstream
+        ));
     }
 }

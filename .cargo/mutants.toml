@@ -1,3 +1,6 @@
+profile = "mutants"
+timeout_multiplier = 5.0
+
 exclude_re = [
     # OS signal registration is the nondeterministic adapter; wait_for_shutdown tests both branches.
     'src/shutdown\.rs:.*: replace shutdown_signal with \(\)$',

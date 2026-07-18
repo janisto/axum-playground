@@ -26,3 +26,4 @@ jobs:
         uses: zizmorcore/zizmor-action@v0.6.0
         with:
           advanced-security: false
+          annotations: true

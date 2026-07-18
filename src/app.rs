@@ -77,9 +77,9 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
         .layer(
             ServiceBuilder::new()
                 .layer(ObservabilityLayer::new(observability_config()))
-                .layer(from_fn(panic_recovery_middleware))
                 .layer(from_fn(security_headers_middleware))
                 .layer(cors_layer)
+                .layer(from_fn(panic_recovery_middleware))
                 .layer(from_fn(timeout_middleware))
                 .layer(from_fn(payload_too_large_problem_middleware))
                 .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE_BYTES)),

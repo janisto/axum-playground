@@ -1,4 +1,4 @@
-use std::{env, fmt};
+use std::{env, fmt, str::FromStr};
 
 use crate::error::StartupError;
 
@@ -6,7 +6,7 @@ use crate::error::StartupError;
 pub struct AppConfig {
     pub port: u16,
     pub firebase_project_id: String,
-    pub app_environment: String,
+    pub app_environment: AppEnvironment,
     pub github_token: Option<String>,
     pub google_application_credentials: Option<String>,
     pub firebase_auth_emulator_host: Option<String>,
@@ -15,6 +15,44 @@ pub struct AppConfig {
     pub gcp_project: Option<String>,
     pub gcloud_project: Option<String>,
     pub project_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AppEnvironment {
+    #[default]
+    Development,
+    Test,
+    Production,
+}
+
+impl AppEnvironment {
+    #[must_use]
+    pub const fn allows_local_emulators(self) -> bool {
+        matches!(self, Self::Development | Self::Test)
+    }
+}
+
+impl fmt::Display for AppEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Development => "development",
+            Self::Test => "test",
+            Self::Production => "production",
+        })
+    }
+}
+
+impl FromStr for AppEnvironment {
+    type Err = StartupError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "development" => Ok(Self::Development),
+            "test" => Ok(Self::Test),
+            "production" => Ok(Self::Production),
+            _ => Err(StartupError::InvalidEnvironment(value.to_owned())),
+        }
+    }
 }
 
 impl fmt::Debug for AppConfig {
@@ -70,7 +108,9 @@ impl AppConfig {
             firebase_project_id: non_blank(value_for("FIREBASE_PROJECT_ID"))
                 .unwrap_or_else(|| "demo-test-project".to_owned()),
             app_environment: non_blank(value_for("APP_ENVIRONMENT"))
-                .unwrap_or_else(|| "development".to_owned()),
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or_default(),
             github_token: non_blank(value_for("GITHUB_TOKEN")),
             google_application_credentials: non_blank(value_for("GOOGLE_APPLICATION_CREDENTIALS")),
             firebase_auth_emulator_host: non_blank(value_for("FIREBASE_AUTH_EMULATOR_HOST")),
@@ -94,7 +134,7 @@ impl AppConfig {
 
     #[must_use]
     pub fn allows_local_emulators(&self) -> bool {
-        matches!(self.app_environment.as_str(), "development" | "test")
+        self.app_environment.allows_local_emulators()
     }
 
     #[must_use]
@@ -119,7 +159,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{AppConfig, StartupError};
+    use super::{AppConfig, AppEnvironment, StartupError};
 
     #[test]
     fn config_values_apply_defaults_and_ignore_blank_input() {
@@ -135,7 +175,7 @@ mod tests {
 
         assert_eq!(config.port, 8080);
         assert_eq!(config.firebase_project_id, "demo-test-project");
-        assert_eq!(config.app_environment, "development");
+        assert_eq!(config.app_environment, AppEnvironment::Development);
         assert_eq!(config.github_token, None);
     }
 
@@ -163,7 +203,7 @@ mod tests {
             AppConfig {
                 port: 9090,
                 firebase_project_id: "firebase-project".to_owned(),
-                app_environment: "production".to_owned(),
+                app_environment: AppEnvironment::Production,
                 github_token: Some("github-token".to_owned()),
                 google_application_credentials: Some("/credentials.json".to_owned()),
                 firebase_auth_emulator_host: Some("127.0.0.1:9099".to_owned()),
@@ -185,11 +225,38 @@ mod tests {
     }
 
     #[test]
+    fn config_values_reject_unknown_environments() {
+        let error =
+            AppConfig::from_values(|key| (key == "APP_ENVIRONMENT").then(|| "staging".to_owned()))
+                .expect_err("unknown environment should fail");
+
+        assert!(matches!(
+            error,
+            StartupError::InvalidEnvironment(value) if value == "staging"
+        ));
+    }
+
+    #[test]
+    fn environment_values_parse_and_display_canonically() {
+        for (value, expected) in [
+            ("development", AppEnvironment::Development),
+            ("test", AppEnvironment::Test),
+            ("production", AppEnvironment::Production),
+        ] {
+            let parsed = value
+                .parse::<AppEnvironment>()
+                .expect("documented environment should parse");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.to_string(), value);
+        }
+    }
+
+    #[test]
     fn debug_output_redacts_secret_bearing_values() {
         let config = AppConfig {
             port: 8080,
             firebase_project_id: "project".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: AppEnvironment::Development,
             github_token: Some("secret-token".to_owned()),
             google_application_credentials: Some("/secret/credentials.json".to_owned()),
             firebase_auth_emulator_host: None,
@@ -211,7 +278,7 @@ mod tests {
         let mut config = AppConfig {
             port: 8080,
             firebase_project_id: "project".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: AppEnvironment::Development,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
@@ -228,7 +295,7 @@ mod tests {
         assert!(!config.emulator_host_is_loopback("emulator.example.com:9099"));
         assert!(!config.emulator_host_is_loopback("127.0.0.1"));
 
-        config.app_environment = "production".to_owned();
+        config.app_environment = AppEnvironment::Production;
         assert!(!config.emulator_host_is_loopback("127.0.0.1:9099"));
     }
 
@@ -237,7 +304,7 @@ mod tests {
         let mut config = AppConfig {
             port: 8080,
             firebase_project_id: "firebase".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: AppEnvironment::Development,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,

@@ -18,8 +18,8 @@ use jsonwebtoken::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-use tracing::warn;
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, warn};
 
 use crate::{config::AppConfig, error::StartupError, problem::problem_response, state::AppState};
 
@@ -30,6 +30,7 @@ const IDENTITY_LOOKUP_URL: &str = "https://identitytoolkit.googleapis.com/v1/acc
 const IDENTITY_TOOLKIT_SCOPE: &str = "https://www.googleapis.com/auth/identitytoolkit";
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
+const JWKS_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 const JWT_LEEWAY_SECS: u64 = 60;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -83,10 +84,17 @@ enum AuthVerifierInner {
 
 #[derive(Clone, Debug)]
 struct ProductionAuthVerifier {
-    client: Client,
     project_id: String,
-    jwks_cache: Arc<RwLock<Option<CachedJwks>>>,
+    jwks_client: GoogleJwksClient,
     lookup_client: IdentityPlatformLookupClient,
+}
+
+#[derive(Clone, Debug)]
+struct GoogleJwksClient {
+    client: Client,
+    url: String,
+    state: Arc<RwLock<JwksState>>,
+    refresh: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +112,12 @@ pub struct MockAuthVerifier {
 struct CachedJwks {
     keys: HashMap<String, GoogleJwk>,
     expires_at: Instant,
+}
+
+#[derive(Clone, Debug, Default)]
+struct JwksState {
+    cached: Option<CachedJwks>,
+    retry: Option<(Instant, AuthError)>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,7 +148,7 @@ struct GoogleJwkSet {
     keys: Vec<GoogleJwk>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct GoogleJwk {
     kid: String,
     n: String,
@@ -194,9 +208,8 @@ impl AuthVerifier {
         Ok(Self {
             inner: Arc::new(AuthVerifierInner::Production(Box::new(
                 ProductionAuthVerifier {
-                    client: client.clone(),
                     project_id: project_id.clone(),
-                    jwks_cache: Arc::new(RwLock::new(None)),
+                    jwks_client: GoogleJwksClient::new(client.clone(), GOOGLE_JWKS_URL),
                     lookup_client: IdentityPlatformLookupClient {
                         client,
                         credentials,
@@ -252,7 +265,7 @@ impl ProductionAuthVerifier {
         let header = decode_header(token).map_err(map_jwt_error)?;
         let kid = rsa_key_id(&header)?;
 
-        let jwk = self.jwk_for_kid(kid).await?;
+        let jwk = self.jwks_client.key_for(kid).await?;
         let key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
             .map_err(|_| AuthError::InvalidToken)?;
 
@@ -275,25 +288,56 @@ impl ProductionAuthVerifier {
 
         Ok(claims.into_user())
     }
+}
 
-    async fn jwk_for_kid(&self, kid: &str) -> Result<GoogleJwk, AuthError> {
-        let cached = {
-            let cache = self.jwks_cache.read().await;
-            cache
-                .as_ref()
-                .and_then(|cache| cache.key_at(kid, Instant::now()))
-        };
-        if let Some(cached) = cached {
-            return Ok(cached);
+impl GoogleJwksClient {
+    fn new(client: Client, url: impl Into<String>) -> Self {
+        Self {
+            client,
+            url: url.into(),
+            state: Arc::new(RwLock::new(JwksState::default())),
+            refresh: Arc::new(Mutex::new(())),
+        }
+    }
+
+    async fn key_for(&self, kid: &str) -> Result<GoogleJwk, AuthError> {
+        let now = Instant::now();
+        if let Some(result) = self.state.read().await.key_or_retry(kid, now) {
+            return result;
         }
 
+        let _refresh_guard = self.refresh.lock().await;
+        let now = Instant::now();
+        if let Some(result) = self.state.read().await.key_or_retry(kid, now) {
+            return result;
+        }
+
+        let refreshed = self.fetch().await;
+        let (keys, ttl) = match refreshed {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let mut state = self.state.write().await;
+                state.retry = Some((now + JWKS_RETRY_COOLDOWN, error.clone()));
+                return Err(error);
+            }
+        };
+        let key = keys.get(kid).cloned();
+        let mut state = self.state.write().await;
+        state.cached = Some(CachedJwks::new(keys, now, ttl));
+        state.retry = key
+            .is_none()
+            .then_some((now + JWKS_RETRY_COOLDOWN, AuthError::InvalidToken));
+
+        key.ok_or(AuthError::InvalidToken)
+    }
+
+    async fn fetch(&self) -> Result<(HashMap<String, GoogleJwk>, Duration), AuthError> {
         let response = self
             .client
-            .get(GOOGLE_JWKS_URL)
+            .get(&self.url)
             .send()
             .await
             .map_err(|_| AuthError::CertificateFetch)?;
-
         require_successful_response(response.status(), AuthError::CertificateFetch)?;
 
         let ttl = cache_ttl(response.headers()).unwrap_or(DEFAULT_JWKS_TTL);
@@ -303,18 +347,29 @@ impl ProductionAuthVerifier {
             .map_err(|_| AuthError::CertificateFetch)?;
         let payload: GoogleJwkSet =
             serde_json::from_slice(&body).map_err(|_| AuthError::CertificateFetch)?;
-
         let keys = payload
             .keys
             .into_iter()
             .map(|key| (key.kid.clone(), key))
-            .collect::<HashMap<_, _>>();
+            .collect();
 
-        let key = keys.get(kid).cloned().ok_or(AuthError::InvalidToken)?;
-        let mut cache = self.jwks_cache.write().await;
-        *cache = Some(CachedJwks::new(keys, Instant::now(), ttl));
+        Ok((keys, ttl))
+    }
+}
 
-        Ok(key)
+impl JwksState {
+    fn key_or_retry(&self, kid: &str, now: Instant) -> Option<Result<GoogleJwk, AuthError>> {
+        if let Some(key) = self
+            .cached
+            .as_ref()
+            .and_then(|cache| cache.key_at(kid, now))
+        {
+            return Some(Ok(key));
+        }
+        self.retry
+            .as_ref()
+            .filter(|(retry_after, _)| now < *retry_after)
+            .map(|(_, error)| Err(error.clone()))
     }
 }
 
@@ -327,11 +382,15 @@ impl CachedJwks {
     }
 
     fn key_at(&self, kid: &str, now: Instant) -> Option<GoogleJwk> {
-        if now >= self.expires_at {
+        if !self.is_fresh(now) {
             return None;
         }
 
         self.keys.get(kid).cloned()
+    }
+
+    fn is_fresh(&self, now: Instant) -> bool {
+        now < self.expires_at
     }
 }
 
@@ -441,12 +500,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
             })?;
 
         let token = extract_bearer_token(authorization).map_err(|error| {
-            warn!(reason = %categorize_auth_error(&error), "auth failed: invalid authorization header");
+            debug!(reason = %categorize_auth_error(&error), "auth failed: invalid authorization header");
             unauthorized_response(&parts.headers, "missing or invalid authorization header")
         })?;
 
         let user = state.auth_verifier.verify(&token).await.map_err(|error| {
-            warn!(reason = %categorize_auth_error(&error), "auth failed: token verification failed");
+            if auth_error_is_dependency_failure(&error) {
+                warn!(reason = %categorize_auth_error(&error), "auth dependency failed");
+            } else {
+                debug!(reason = %categorize_auth_error(&error), "auth failed: token verification failed");
+            }
             map_auth_error(&parts.headers, error)
         })?;
 
@@ -566,6 +629,13 @@ fn categorize_auth_error(error: &AuthError) -> &'static str {
     }
 }
 
+fn auth_error_is_dependency_failure(error: &AuthError) -> bool {
+    matches!(
+        error,
+        AuthError::CertificateFetch | AuthError::ServiceUnavailable
+    )
+}
+
 fn unauthorized_response(headers: &HeaderMap, detail: &str) -> Response {
     let mut response = problem_response(StatusCode::UNAUTHORIZED, detail, headers);
     response
@@ -630,25 +700,47 @@ fn cache_ttl(headers: &HeaderMap) -> Option<Duration> {
 mod tests {
     use std::{
         collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     };
 
-    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::{
+        Json, Router,
+        http::{HeaderMap, HeaderValue, StatusCode, header},
+        routing::get,
+    };
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use futures_util::future::join_all;
     use jsonwebtoken::{
         Algorithm, Header,
         errors::{Error as JwtError, ErrorKind as JwtErrorKind},
     };
     use serde_json::json;
+    use tokio::net::TcpListener;
 
     use super::{
         AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaims, FirebaseUser,
-        GoogleJwk, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, cache_ttl,
-        categorize_auth_error, expected_issuer, extract_bearer_token, firebase_validation,
-        map_jwt_error, require_successful_response, rsa_key_id, token_is_revoked,
-        validate_common_claims_at,
+        GoogleJwk, GoogleJwksClient, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS,
+        JwksState, auth_error_is_dependency_failure, cache_ttl, categorize_auth_error,
+        expected_issuer, extract_bearer_token, firebase_validation, map_jwt_error,
+        require_successful_response, rsa_key_id, token_is_revoked, validate_common_claims_at,
     };
     use crate::{config::AppConfig, error::StartupError};
+
+    async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn extract_bearer_token_accepts_case_insensitive_scheme() {
@@ -688,13 +780,13 @@ mod tests {
         ));
 
         config.firebase_auth_emulator_host = Some("127.0.0.1:9099".to_owned());
-        config.app_environment = "production".to_owned();
+        config.app_environment = crate::config::AppEnvironment::Production;
         assert!(matches!(
             AuthVerifier::from_config(&config),
             Err(StartupError::UnsafeEmulatorHost { .. })
         ));
 
-        config.app_environment = "development".to_owned();
+        config.app_environment = crate::config::AppEnvironment::Development;
         assert!(AuthVerifier::from_config(&config).is_ok());
     }
 
@@ -847,12 +939,166 @@ mod tests {
             Some("google-key".to_owned())
         );
         assert_eq!(cache.key_at("missing-key", now).map(|key| key.kid), None);
+        assert!(cache.is_fresh(now));
         assert_eq!(
             cache
                 .key_at("google-key", cache.expires_at)
                 .map(|key| key.kid),
             None
         );
+    }
+
+    #[test]
+    fn jwks_retry_cooldown_expires_at_the_exact_deadline() {
+        let deadline = Instant::now();
+        let state = JwksState {
+            cached: None,
+            retry: Some((deadline, AuthError::CertificateFetch)),
+        };
+
+        assert_eq!(
+            state.key_or_retry("key", deadline - Duration::from_nanos(1)),
+            Some(Err(AuthError::CertificateFetch))
+        );
+        assert_eq!(state.key_or_retry("key", deadline), None);
+    }
+
+    #[tokio::test]
+    async fn jwks_unknown_keys_are_cached_and_refreshes_are_singleflight() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let route_fetches = fetches.clone();
+        let app = Router::new().route(
+            "/jwks",
+            get(move || {
+                let route_fetches = route_fetches.clone();
+                async move {
+                    route_fetches.fetch_add(1, Ordering::SeqCst);
+                    (
+                        [(header::CACHE_CONTROL, "public, max-age=3600")],
+                        Json(json!({
+                            "keys": [{"kid": "known-key", "n": "modulus", "e": "AQAB"}]
+                        })),
+                    )
+                }
+            }),
+        );
+        let (base_url, handle) = spawn_test_server(app).await;
+        let client = GoogleJwksClient::new(reqwest::Client::new(), format!("{base_url}/jwks"));
+
+        assert_eq!(
+            client
+                .key_for("known-key")
+                .await
+                .expect("known key should load")
+                .kid,
+            "known-key"
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            client.key_for("unknown-key").await,
+            Err(AuthError::InvalidToken)
+        );
+        assert_eq!(
+            client.key_for("unknown-key").await,
+            Err(AuthError::InvalidToken)
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        assert!(client.key_for("known-key").await.is_ok());
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+
+        let concurrent_client =
+            GoogleJwksClient::new(reqwest::Client::new(), format!("{base_url}/jwks"));
+        let results = join_all((0..8).map(|_| {
+            let concurrent_client = concurrent_client.clone();
+            async move { concurrent_client.key_for("attacker-key").await }
+        }))
+        .await;
+        assert!(
+            results
+                .iter()
+                .all(|result| *result == Err(AuthError::InvalidToken))
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 3);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn jwks_cache_refreshes_once_for_a_rotated_key() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let route_fetches = fetches.clone();
+        let app = Router::new().route(
+            "/jwks",
+            get(move || {
+                let route_fetches = route_fetches.clone();
+                async move {
+                    let request = route_fetches.fetch_add(1, Ordering::SeqCst);
+                    let keys = if request == 0 {
+                        json!([{"kid": "old-key", "n": "old-modulus", "e": "AQAB"}])
+                    } else {
+                        json!([
+                            {"kid": "old-key", "n": "old-modulus", "e": "AQAB"},
+                            {"kid": "new-key", "n": "new-modulus", "e": "AQAB"}
+                        ])
+                    };
+                    (
+                        [(header::CACHE_CONTROL, "public, max-age=3600")],
+                        Json(json!({"keys": keys})),
+                    )
+                }
+            }),
+        );
+        let (base_url, handle) = spawn_test_server(app).await;
+        let client = GoogleJwksClient::new(reqwest::Client::new(), format!("{base_url}/jwks"));
+
+        assert_eq!(
+            client
+                .key_for("old-key")
+                .await
+                .expect("old key should load")
+                .n,
+            "old-modulus"
+        );
+        assert_eq!(
+            client
+                .key_for("new-key")
+                .await
+                .expect("rotated key should refresh")
+                .n,
+            "new-modulus"
+        );
+        assert!(client.key_for("new-key").await.is_ok());
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn jwks_fetch_failures_remain_dependency_errors_during_cooldown() {
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let route_fetches = fetches.clone();
+        let app = Router::new().route(
+            "/jwks",
+            get(move || {
+                let route_fetches = route_fetches.clone();
+                async move {
+                    route_fetches.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let (base_url, handle) = spawn_test_server(app).await;
+        let client = GoogleJwksClient::new(reqwest::Client::new(), format!("{base_url}/jwks"));
+
+        assert_eq!(
+            client.key_for("rotated-key").await,
+            Err(AuthError::CertificateFetch)
+        );
+        assert_eq!(
+            client.key_for("rotated-key").await,
+            Err(AuthError::CertificateFetch)
+        );
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        handle.abort();
     }
 
     #[test]
@@ -949,6 +1195,23 @@ mod tests {
         ] {
             assert_eq!(categorize_auth_error(&error), category);
         }
+
+        for error in [
+            AuthError::MissingAuthorization,
+            AuthError::InvalidAuthorization,
+            AuthError::InvalidToken,
+            AuthError::TokenExpired,
+            AuthError::TokenRevoked,
+            AuthError::UserDisabled,
+        ] {
+            assert!(!auth_error_is_dependency_failure(&error));
+        }
+        assert!(auth_error_is_dependency_failure(
+            &AuthError::CertificateFetch
+        ));
+        assert!(auth_error_is_dependency_failure(
+            &AuthError::ServiceUnavailable
+        ));
     }
 
     #[tokio::test]
@@ -1069,7 +1332,7 @@ mod tests {
         AppConfig {
             port: 8080,
             firebase_project_id: "demo-test-project".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: crate::config::AppEnvironment::Development,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,

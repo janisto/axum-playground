@@ -21,15 +21,15 @@ use crate::{
     problem::{ProblemDetails, ProblemResponse, problem_response},
     services::profile::{CreateProfileParams, Profile, ProfileServiceError, UpdateProfileParams},
     state::AppState,
-    validation::{valid_email, valid_name, valid_phone_number},
+    validation::{normalize_name, valid_email, valid_phone_number},
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProfileBody {
-    #[schema(required = true, value_type = String, min_length = 1, max_length = 100)]
+    #[schema(required = true, value_type = String, min_length = 1, max_length = 100, pattern = r".*\S.*")]
     pub firstname: Option<String>,
-    #[schema(required = true, value_type = String, min_length = 1, max_length = 100)]
+    #[schema(required = true, value_type = String, min_length = 1, max_length = 100, pattern = r".*\S.*")]
     pub lastname: Option<String>,
     #[schema(required = true, value_type = String)]
     pub email: Option<String>,
@@ -46,10 +46,10 @@ pub struct CreateProfileBody {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProfileBody {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    #[schema(required = false, value_type = String, min_length = 1, max_length = 100)]
+    #[schema(required = false, value_type = String, min_length = 1, max_length = 100, pattern = r".*\S.*")]
     pub firstname: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    #[schema(required = false, value_type = String, min_length = 1, max_length = 100)]
+    #[schema(required = false, value_type = String, min_length = 1, max_length = 100, pattern = r".*\S.*")]
     pub lastname: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     #[schema(required = false, value_type = String)]
@@ -260,18 +260,13 @@ pub async fn delete_profile_handler(
 }
 
 fn parse_create_body(input: CreateProfileBody) -> Result<CreateProfileParams, ()> {
-    let firstname = input.firstname.ok_or(())?;
-    let lastname = input.lastname.ok_or(())?;
+    let firstname = normalize_name(&input.firstname.ok_or(())?).ok_or(())?;
+    let lastname = normalize_name(&input.lastname.ok_or(())?).ok_or(())?;
     let email = input.email.ok_or(())?;
     let phone_number = input.phone_number.ok_or(())?;
     let terms = input.terms.ok_or(())?;
 
-    if !valid_name(&firstname)
-        || !valid_name(&lastname)
-        || !valid_email(&email)
-        || !valid_phone_number(&phone_number)
-        || !terms
-    {
+    if !valid_email(&email) || !valid_phone_number(&phone_number) || !terms {
         return Err(());
     }
 
@@ -295,18 +290,19 @@ fn parse_update_body(input: UpdateProfileBody) -> Result<UpdateProfileParams, ()
         return Err(());
     }
 
-    if input
+    let firstname = input
         .firstname
+        .map(|value| normalize_name(&value).ok_or(()))
+        .transpose()?;
+    let lastname = input
+        .lastname
+        .map(|value| normalize_name(&value).ok_or(()))
+        .transpose()?;
+
+    if input
+        .email
         .as_deref()
-        .is_some_and(|value| !valid_name(value))
-        || input
-            .lastname
-            .as_deref()
-            .is_some_and(|value| !valid_name(value))
-        || input
-            .email
-            .as_deref()
-            .is_some_and(|value| !valid_email(value))
+        .is_some_and(|value| !valid_email(value))
         || input
             .phone_number
             .as_deref()
@@ -316,8 +312,8 @@ fn parse_update_body(input: UpdateProfileBody) -> Result<UpdateProfileParams, ()
     }
 
     Ok(UpdateProfileParams {
-        firstname: input.firstname,
-        lastname: input.lastname,
+        firstname,
+        lastname,
         email: input.email,
         phone_number: input.phone_number,
         marketing: input.marketing,
@@ -336,11 +332,18 @@ fn map_service_error(headers: &HeaderMap, error: ProfileServiceError) -> Respons
         ProfileServiceError::AlreadyExists => {
             problem_response(StatusCode::CONFLICT, "profile already exists", headers)
         }
-        ProfileServiceError::Backend(_) => problem_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal server error",
-            headers,
-        ),
+        ProfileServiceError::Backend(error) => {
+            tracing::warn!(
+                operation = %error.operation(),
+                reason = "backend",
+                "profile operation failed"
+            );
+            problem_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error",
+                headers,
+            )
+        }
     }
 }
 

@@ -84,6 +84,11 @@ test-doc:
 test-emulators:
     if [[ -z "${FIRESTORE_EMULATOR_HOST:-}" ]]; then echo "Skipping Firestore emulator tests because FIRESTORE_EMULATOR_HOST is unset."; else cargo test --locked --test firestore_emulator -- --ignored; fi
 
+[group('test')]
+test-emulators-ci:
+    firebase emulators:exec --only firestore --project demo-test-project \
+        "cargo test --locked --test firestore_emulator -- --ignored"
+
 [group('adversarial')]
 mutations *args:
     cargo mutants {{ args }}

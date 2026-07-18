@@ -24,9 +24,31 @@ fn binary_rejects_an_invalid_port() {
 }
 
 #[test]
+fn binary_rejects_an_unknown_environment() {
+    let output = Command::new(env!("CARGO_BIN_EXE_axum-playground"))
+        .env("APP_ENVIRONMENT", "staging")
+        .env_remove("FIREBASE_AUTH_EMULATOR_HOST")
+        .env_remove("FIRESTORE_EMULATOR_HOST")
+        .output()
+        .expect("application binary should run");
+
+    assert!(
+        !output.status.success(),
+        "unknown APP_ENVIRONMENT should fail startup"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("startup error should be UTF-8");
+    assert!(
+        stderr.contains("InvalidEnvironment(\"staging\")"),
+        "startup should report the rejected environment, got: {stderr}"
+    );
+}
+
+#[test]
 fn tracing_initialization_emits_structured_json() {
     if std::env::var_os(TRACING_CHILD_ENV).is_some() {
-        init_tracing("test").expect("isolated tracing initialization should succeed");
+        init_tracing(axum_playground::AppEnvironment::Test)
+            .expect("isolated tracing initialization should succeed");
         tracing::info!(mutation_test_marker = true, "tracing initialized");
         return;
     }

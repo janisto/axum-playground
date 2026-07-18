@@ -5,8 +5,8 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use axum_playground::{
-    AuthError, MockAuthVerifier, MockProfileService, Profile, ProfileService, ProfileServiceError,
-    build_app, problem::ProblemDetails,
+    AuthError, MockAuthVerifier, MockProfileService, Profile, ProfileBackendError,
+    ProfileOperation, ProfileService, ProfileServiceError, build_app, problem::ProblemDetails,
 };
 use tower::ServiceExt;
 
@@ -134,7 +134,7 @@ async fn profile_crud_flow_matches_contract() {
         .oneshot(authorized_json_request(
             Method::POST,
             "/v1/profile",
-            r#"{"firstname":"John","lastname":"Doe","email":"JOHN@EXAMPLE.COM","phoneNumber":"+358401234567","marketing":true,"terms":true}"#,
+            r#"{"firstname":"  John ","lastname":" Doe  ","email":"JOHN@EXAMPLE.COM","phoneNumber":"+358401234567","marketing":true,"terms":true}"#,
         ))
         .await
         .expect("request should succeed");
@@ -186,7 +186,7 @@ async fn profile_crud_flow_matches_contract() {
                 .uri("/v1/profile")
                 .header(header::AUTHORIZATION, "Bearer valid-token")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"firstname":"Jane","marketing":false}"#))
+                .body(Body::from(r#"{"firstname":" Jane ","marketing":false}"#))
                 .expect("request should build"),
         )
         .await
@@ -232,6 +232,27 @@ async fn profile_crud_flow_matches_contract() {
 #[tokio::test]
 async fn profile_validation_and_conflict_errors_map_correctly() {
     let state = test_state();
+
+    for invalid_name in ["   ", "John\nDoe", "John\u{7f}Doe"] {
+        let body = serde_json::to_string(&serde_json::json!({
+            "firstname": invalid_name,
+            "lastname": "Doe",
+            "email": "john@example.com",
+            "phoneNumber": "+358401234567",
+            "terms": true
+        }))
+        .expect("profile body should serialize");
+        let response = build_app(state.clone())
+            .oneshot(authorized_json_request(Method::POST, "/v1/profile", &body))
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{invalid_name:?}"
+        );
+    }
 
     let invalid_create = build_app(state.clone())
         .oneshot(authorized_json_request(
@@ -367,7 +388,10 @@ async fn profile_backend_errors_return_500() {
     let state = test_state_with_auth_and_profile(
         axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
         ProfileService::mock(MockProfileService::default().with_error(
-            ProfileServiceError::Backend("unexpected database error".to_owned()),
+            ProfileServiceError::Backend(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("unexpected database error"),
+            )),
         )),
     );
 
@@ -422,6 +446,12 @@ async fn openapi_includes_profile_path() {
         serde_json::json!(["firstname", "lastname", "email", "phoneNumber", "terms"])
     );
     assert_eq!(create_schema["properties"]["firstname"]["type"], "string");
+    assert_eq!(create_schema["properties"]["firstname"]["minLength"], 1);
+    assert_eq!(create_schema["properties"]["firstname"]["maxLength"], 100);
+    assert_eq!(
+        create_schema["properties"]["firstname"]["pattern"],
+        r".*\S.*"
+    );
     assert_eq!(
         create_schema["properties"]["phoneNumber"]["pattern"],
         r"^\+[1-9][0-9]{6,14}$"
@@ -434,6 +464,10 @@ async fn openapi_includes_profile_path() {
     let update_schema = &document["components"]["schemas"]["UpdateProfileBody"];
     assert!(update_schema.get("required").is_none());
     assert_eq!(update_schema["properties"]["firstname"]["type"], "string");
+    assert_eq!(
+        update_schema["properties"]["firstname"]["pattern"],
+        r".*\S.*"
+    );
 
     for method in ["get", "post", "patch", "delete"] {
         let responses = &document["paths"]["/v1/profile"][method]["responses"];

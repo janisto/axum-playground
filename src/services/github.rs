@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 use reqwest::{Client, StatusCode};
 use serde::{
@@ -12,7 +12,6 @@ const DEFAULT_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2022-11-28";
-const LIST_LIMIT: usize = 30;
 
 #[derive(Clone, Debug)]
 pub struct GitHubService {
@@ -35,12 +34,27 @@ struct HttpGitHubService {
 #[derive(Clone, Debug, Default)]
 pub struct MockGitHubService {
     owner: Option<Owner>,
-    repos: Vec<RepoSummary>,
+    repos_page: ListPage<RepoSummary>,
     repo: Option<Repo>,
     activity_page: ActivityPage,
     languages: Vec<Language>,
-    tags: Vec<Tag>,
+    tags_page: ListPage<Tag>,
     error: Option<GitHubServiceError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: String,
+}
+
+impl<T> Default for ListPage<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next_cursor: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
@@ -129,20 +143,25 @@ pub struct Language {
     pub bytes: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum GitHubServiceError {
+    #[error("GitHub resource not found")]
     NotFound,
+    #[error("GitHub access forbidden")]
     Forbidden,
+    #[error("GitHub rate limit exceeded")]
     RateLimited,
+    #[error(transparent)]
     Upstream(GitHubUpstreamError),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct GitHubUpstreamError {
     pub kind: GitHubUpstreamErrorKind,
     pub status: u16,
     pub retry_after: Option<String>,
     pub rate_limit_reset: Option<String>,
+    source: Option<Arc<dyn Error + Send + Sync>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,10 +209,15 @@ impl GitHubService {
         }
     }
 
-    pub async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
+    pub async fn list_repos(
+        &self,
+        owner: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
         match self.inner.as_ref() {
-            GitHubServiceInner::Http(service) => service.list_repos(owner).await,
-            GitHubServiceInner::Mock(service) => service.list_repos(owner).await,
+            GitHubServiceInner::Http(service) => service.list_repos(owner, limit, page).await,
+            GitHubServiceInner::Mock(service) => service.list_repos(owner, limit, page).await,
         }
     }
 
@@ -236,10 +260,16 @@ impl GitHubService {
         }
     }
 
-    pub async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
+    pub async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
         match self.inner.as_ref() {
-            GitHubServiceInner::Http(service) => service.list_tags(owner, repo).await,
-            GitHubServiceInner::Mock(service) => service.list_tags(owner, repo).await,
+            GitHubServiceInner::Http(service) => service.list_tags(owner, repo, limit, page).await,
+            GitHubServiceInner::Mock(service) => service.list_tags(owner, repo, limit, page).await,
         }
     }
 }
@@ -260,18 +290,21 @@ impl MockGitHubService {
                 created_at: "2011-01-25T18:44:36Z".to_owned(),
                 updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }),
-            repos: vec![RepoSummary {
-                name: "git-consortium".to_owned(),
-                full_name: "octocat/git-consortium".to_owned(),
-                description: "This repo is for demonstration purposes.".to_owned(),
-                html_url: "https://github.com/octocat/git-consortium".to_owned(),
-                language: "Ruby".to_owned(),
-                stars: 16,
-                forks: 10,
-                open_issues: 0,
-                created_at: "2011-01-25T18:44:36Z".to_owned(),
-                updated_at: "2024-06-01T00:00:00Z".to_owned(),
-            }],
+            repos_page: ListPage {
+                items: vec![RepoSummary {
+                    name: "git-consortium".to_owned(),
+                    full_name: "octocat/git-consortium".to_owned(),
+                    description: "This repo is for demonstration purposes.".to_owned(),
+                    html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                    language: "Ruby".to_owned(),
+                    stars: 16,
+                    forks: 10,
+                    open_issues: 0,
+                    created_at: "2011-01-25T18:44:36Z".to_owned(),
+                    updated_at: "2024-06-01T00:00:00Z".to_owned(),
+                }],
+                next_cursor: String::new(),
+            },
             repo: Some(Repo {
                 repo_summary: RepoSummary {
                     name: "git-consortium".to_owned(),
@@ -308,12 +341,15 @@ impl MockGitHubService {
                 name: "Ruby".to_owned(),
                 bytes: 6789,
             }],
-            tags: vec![Tag {
-                name: "v1.0".to_owned(),
-                commit: TagCommit {
-                    sha: "abc123".to_owned(),
-                },
-            }],
+            tags_page: ListPage {
+                items: vec![Tag {
+                    name: "v1.0".to_owned(),
+                    commit: TagCommit {
+                        sha: "abc123".to_owned(),
+                    },
+                }],
+                next_cursor: String::new(),
+            },
             error: None,
         }
     }
@@ -330,6 +366,18 @@ impl MockGitHubService {
         self
     }
 
+    #[must_use]
+    pub fn with_repos_page(mut self, repos_page: ListPage<RepoSummary>) -> Self {
+        self.repos_page = repos_page;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tags_page(mut self, tags_page: ListPage<Tag>) -> Self {
+        self.tags_page = tags_page;
+        self
+    }
+
     async fn get_owner(&self, owner: &str) -> Result<Owner, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
@@ -341,7 +389,12 @@ impl MockGitHubService {
             .ok_or(GitHubServiceError::NotFound)
     }
 
-    async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
+    async fn list_repos(
+        &self,
+        owner: &str,
+        _limit: usize,
+        _page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
@@ -351,7 +404,7 @@ impl MockGitHubService {
             .as_ref()
             .is_some_and(|current_owner| current_owner.login == owner)
         {
-            Ok(self.repos.clone())
+            Ok(self.repos_page.clone())
         } else {
             Err(GitHubServiceError::NotFound)
         }
@@ -406,7 +459,13 @@ impl MockGitHubService {
         }
     }
 
-    async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
+    async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        _limit: usize,
+        _page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
@@ -414,7 +473,7 @@ impl MockGitHubService {
         if self.repo.as_ref().is_some_and(|current_repo| {
             current_repo.repo_summary.full_name == format!("{owner}/{repo}")
         }) {
-            Ok(self.tags.clone())
+            Ok(self.tags_page.clone())
         } else {
             Err(GitHubServiceError::NotFound)
         }
@@ -429,18 +488,34 @@ impl HttpGitHubService {
         Ok(payload.into_owner())
     }
 
-    async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
-        let payload: Vec<GitHubRepoSummaryPayload> = self
-            .send_json(
-                self.client
-                    .get(self.url(&["users", owner, "repos"]))
-                    .query(&[("per_page", LIST_LIMIT)]),
-            )
-            .await?;
-        Ok(payload
-            .into_iter()
-            .map(GitHubRepoSummaryPayload::into_repo_summary)
-            .collect())
+    async fn list_repos(
+        &self,
+        owner: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
+        let mut request = self
+            .client
+            .get(self.url(&["users", owner, "repos"]))
+            .query(&[("per_page", limit)]);
+        if !page.is_empty() {
+            request = request.query(&[("page", page)]);
+        }
+
+        let response = self.send(request).await?;
+        let next_cursor = response
+            .headers()
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|link| extract_next_query_value(link, "page"));
+        let payload = decode_json::<Vec<GitHubRepoSummaryPayload>>(response).await?;
+        Ok(ListPage {
+            items: payload
+                .into_iter()
+                .map(GitHubRepoSummaryPayload::into_repo_summary)
+                .collect(),
+            next_cursor: next_cursor.unwrap_or_default(),
+        })
     }
 
     async fn get_repo(&self, owner: &str, repo: &str) -> Result<Repo, GitHubServiceError> {
@@ -470,7 +545,7 @@ impl HttpGitHubService {
             .headers()
             .get("link")
             .and_then(|value| value.to_str().ok())
-            .and_then(extract_next_cursor);
+            .and_then(|link| extract_next_query_value(link, "after"));
         let payload = decode_json::<Vec<GitHubActivityPayload>>(response).await?;
 
         Ok(ActivityPage {
@@ -507,19 +582,36 @@ impl HttpGitHubService {
         Ok(languages)
     }
 
-    async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
-        let payload: Vec<GitHubTagPayload> = self
-            .send_json(
-                self.client
-                    .get(self.url(&["repos", owner, repo, "tags"]))
-                    .query(&[("per_page", LIST_LIMIT)]),
-            )
-            .await?;
+    async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
+        let mut request = self
+            .client
+            .get(self.url(&["repos", owner, repo, "tags"]))
+            .query(&[("per_page", limit)]);
+        if !page.is_empty() {
+            request = request.query(&[("page", page)]);
+        }
 
-        Ok(payload
-            .into_iter()
-            .map(GitHubTagPayload::into_tag)
-            .collect())
+        let response = self.send(request).await?;
+        let next_cursor = response
+            .headers()
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|link| extract_next_query_value(link, "page"));
+        let payload = decode_json::<Vec<GitHubTagPayload>>(response).await?;
+
+        Ok(ListPage {
+            items: payload
+                .into_iter()
+                .map(GitHubTagPayload::into_tag)
+                .collect(),
+            next_cursor: next_cursor.unwrap_or_default(),
+        })
     }
 
     async fn send_json<T>(&self, request: reqwest::RequestBuilder) -> Result<T, GitHubServiceError>
@@ -544,10 +636,9 @@ impl HttpGitHubService {
             request = request.bearer_auth(token);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))?;
+        let response = request.send().await.map_err(|error| {
+            GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0).with_source(error))
+        })?;
 
         if response.status().is_success() {
             Ok(response)
@@ -568,13 +659,59 @@ impl HttpGitHubService {
 }
 
 impl GitHubUpstreamError {
-    fn upstream(status: u16) -> Self {
+    #[must_use]
+    pub fn new(
+        kind: GitHubUpstreamErrorKind,
+        status: u16,
+        retry_after: Option<String>,
+        rate_limit_reset: Option<String>,
+    ) -> Self {
         Self {
-            kind: GitHubUpstreamErrorKind::Upstream,
+            kind,
             status,
-            retry_after: None,
-            rate_limit_reset: None,
+            retry_after,
+            rate_limit_reset,
+            source: None,
         }
+    }
+
+    fn upstream(status: u16) -> Self {
+        Self::new(GitHubUpstreamErrorKind::Upstream, status, None, None)
+    }
+
+    fn with_source(mut self, source: impl Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Arc::new(source));
+        self
+    }
+}
+
+impl fmt::Debug for GitHubUpstreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitHubUpstreamError")
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("retry_after", &self.retry_after)
+            .field("rate_limit_reset", &self.rate_limit_reset)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for GitHubUpstreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "GitHub upstream {:?} error with status {}",
+            self.kind, self.status
+        )
+    }
+}
+
+impl Error for GitHubUpstreamError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
     }
 }
 
@@ -584,41 +721,41 @@ fn map_http_error(status: StatusCode, headers: &reqwest::header::HeaderMap) -> G
     let rate_limit_remaining = header_value(headers, "x-ratelimit-remaining");
 
     if status == StatusCode::NOT_FOUND {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::NotFound,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::NotFound,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
     if status == StatusCode::TOO_MANY_REQUESTS
         || (status == StatusCode::FORBIDDEN
             && (retry_after.is_some() || rate_limit_remaining.as_deref() == Some("0")))
     {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::RateLimited,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::RateLimited,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
     if status == StatusCode::FORBIDDEN {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::Forbidden,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::Forbidden,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
-    GitHubServiceError::Upstream(GitHubUpstreamError {
-        kind: GitHubUpstreamErrorKind::Upstream,
-        status: status.as_u16(),
+    GitHubServiceError::Upstream(GitHubUpstreamError::new(
+        GitHubUpstreamErrorKind::Upstream,
+        status.as_u16(),
         retry_after,
         rate_limit_reset,
-    })
+    ))
 }
 
 fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
@@ -633,10 +770,9 @@ where
     T: DeserializeOwned,
 {
     let status = response.status().as_u16();
-    response
-        .json::<T>()
-        .await
-        .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status)))
+    response.json::<T>().await.map_err(|error| {
+        GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status).with_source(error))
+    })
 }
 
 fn deserialize_http_url<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -660,7 +796,7 @@ where
     Ok(value)
 }
 
-fn extract_next_cursor(link_header: &str) -> Option<String> {
+fn extract_next_query_value(link_header: &str, query_key: &str) -> Option<String> {
     link_header.split(',').find_map(|part| {
         let part = part.trim();
         if !part.contains("rel=\"next\"") {
@@ -671,7 +807,7 @@ fn extract_next_cursor(link_header: &str) -> Option<String> {
         let end = part[start..].find('>')? + start;
         let url = reqwest::Url::parse(&part[start..end]).ok()?;
         url.query_pairs()
-            .find(|(key, _)| key == "after")
+            .find(|(key, _)| key == query_key)
             .map(|(_, value)| value.into_owned())
     })
 }
@@ -841,7 +977,8 @@ mod tests {
     use axum::{
         Json, Router,
         extract::Query,
-        http::{HeaderMap, Response as HttpResponse, StatusCode, header},
+        http::{HeaderMap, HeaderValue, Response as HttpResponse, StatusCode, header},
+        response::IntoResponse,
         routing::get,
     };
     use serde_json::{Value, json};
@@ -880,6 +1017,8 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_contract_failure_preserves_successful_http_status() {
+        use std::error::Error as _;
+
         let payload = json!({
             "login": "octocat",
             "name": "The Octocat",
@@ -903,10 +1042,20 @@ mod tests {
             .await
             .expect_err("non-HTTP avatar URL should violate the upstream contract");
 
+        let GitHubServiceError::Upstream(upstream) = error else {
+            panic!("expected upstream error");
+        };
+        assert_eq!(upstream.kind, GitHubUpstreamErrorKind::Upstream);
+        assert_eq!(upstream.status, 200);
         assert_eq!(
-            error,
-            GitHubServiceError::Upstream(super::GitHubUpstreamError::upstream(200))
+            upstream.to_string(),
+            "GitHub upstream Upstream error with status 200"
         );
+        let debug = format!("{upstream:?}");
+        assert!(debug.contains("kind: Upstream"));
+        assert!(debug.contains("status: 200"));
+        assert!(upstream.source().is_some());
+        assert!(!debug.contains("javascript:alert"));
     }
 
     #[test]
@@ -1031,8 +1180,9 @@ mod tests {
                 "/users/{owner}/repos",
                 get(
                     |Query(query): Query<std::collections::HashMap<String, String>>| async move {
-                        assert_eq!(query.get("per_page").map(String::as_str), Some("30"));
-                        Json(json!([{
+                        assert_eq!(query.get("per_page").map(String::as_str), Some("50"));
+                        assert_eq!(query.get("page").map(String::as_str), Some("3"));
+                        let mut response = Json(json!([{
                             "name": "git-consortium",
                             "full_name": "octocat/git-consortium",
                             "description": null,
@@ -1044,16 +1194,34 @@ mod tests {
                             "created_at": "2011-01-25T18:44:36Z",
                             "updated_at": "2024-06-01T00:00:00Z"
                         }]))
+                        .into_response();
+                        response.headers_mut().insert(
+                            header::LINK,
+                            HeaderValue::from_static(
+                                "<https://api.github.test/users/octocat/repos?page=4>; rel=\"next\"",
+                            ),
+                        );
+                        response
                     },
                 ),
             )
             .route(
                 "/repos/{owner}/{repo}/tags",
-                get(|| async {
-                    Json(json!([{
+                get(|Query(query): Query<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(query.get("per_page").map(String::as_str), Some("25"));
+                    assert_eq!(query.get("page").map(String::as_str), Some("2"));
+                    let mut response = Json(json!([{
                         "name": "v1.0.0",
                         "commit": { "sha": "abc123" }
                     }]))
+                    .into_response();
+                    response.headers_mut().insert(
+                        header::LINK,
+                        HeaderValue::from_static(
+                            "<https://api.github.test/repos/octocat/git-consortium/tags?page=3>; rel=\"next\"",
+                        ),
+                    );
+                    response
                 }),
             );
 
@@ -1067,22 +1235,24 @@ mod tests {
         assert_eq!(owner.location, "San Francisco");
 
         let repos = service
-            .list_repos("octocat")
+            .list_repos("octocat", 50, "3")
             .await
             .expect("repositories should load");
-        assert_eq!(repos.len(), 1);
-        assert_eq!(repos[0].name, "git-consortium");
-        assert_eq!(repos[0].description, "");
+        assert_eq!(repos.next_cursor, "4");
+        assert_eq!(repos.items.len(), 1);
+        assert_eq!(repos.items[0].name, "git-consortium");
+        assert_eq!(repos.items[0].description, "");
 
         let tags = service
-            .list_tags("octocat", "git-consortium")
+            .list_tags("octocat", "git-consortium", 25, "2")
             .await
             .expect("tags should load");
         handle.abort();
 
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].name, "v1.0.0");
-        assert_eq!(tags[0].commit.sha, "abc123");
+        assert_eq!(tags.next_cursor, "3");
+        assert_eq!(tags.items.len(), 1);
+        assert_eq!(tags.items[0].name, "v1.0.0");
+        assert_eq!(tags.items[0].commit.sha, "abc123");
     }
 
     #[test]

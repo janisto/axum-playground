@@ -58,7 +58,7 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
         )
         .await
         .expect_err("duplicate create should fail against emulator");
-    assert_eq!(duplicate, ProfileServiceError::AlreadyExists);
+    assert!(matches!(duplicate, ProfileServiceError::AlreadyExists));
 
     let fetched = service
         .get(USER_ID)
@@ -92,7 +92,7 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
         .get(USER_ID)
         .await
         .expect_err("deleted profile should not be found");
-    assert_eq!(missing, ProfileServiceError::NotFound);
+    assert!(matches!(missing, ProfileServiceError::NotFound));
 
     flush_emulator(&emulator_host, PROJECT_ID).await;
 }
@@ -101,7 +101,7 @@ fn emulator_config() -> AppConfig {
     AppConfig {
         port: 8080,
         firebase_project_id: PROJECT_ID.to_owned(),
-        app_environment: "test".to_owned(),
+        app_environment: axum_playground::AppEnvironment::Test,
         github_token: None,
         google_application_credentials: None,
         firebase_auth_emulator_host: Some("127.0.0.1:9099".to_owned()),

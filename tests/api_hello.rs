@@ -81,7 +81,7 @@ async fn post_hello_supports_json_and_cbor_requests() {
                 .method(Method::POST)
                 .uri("/v1/hello")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"name":"Test"}"#))
+                .body(Body::from(r#"{"name":"  Test  "}"#))
                 .expect("request should build"),
         )
         .await
@@ -92,7 +92,7 @@ async fn post_hello_supports_json_and_cbor_requests() {
     assert_eq!(json_body.message, "Hello, Test!");
 
     let mut cbor_payload = Vec::new();
-    ciborium::into_writer(&serde_json::json!({"name": "CBOR"}), &mut cbor_payload)
+    ciborium::into_writer(&serde_json::json!({"name": "  CBOR  "}), &mut cbor_payload)
         .expect("CBOR payload should serialize");
 
     let cbor_response = build_app(test_state())
@@ -178,6 +178,31 @@ async fn post_hello_validation_errors_follow_accept_negotiation() {
         cbor_problem.status,
         StatusCode::UNPROCESSABLE_ENTITY.as_u16()
     );
+}
+
+#[tokio::test]
+async fn post_hello_rejects_blank_and_control_character_names() {
+    for name in ["   ", "Jane\nDoe", "Jane\u{7f}Doe"] {
+        let body = serde_json::to_vec(&serde_json::json!({"name": name}))
+            .expect("request body should serialize");
+        let response = build_app(test_state())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/hello")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{name:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -320,6 +345,10 @@ async fn openapi_includes_hello_paths_and_media_types() {
     let document: serde_json::Value =
         serde_json::from_str(&body).expect("OpenAPI document should be JSON");
     let post = &document["paths"]["/v1/hello"]["post"];
+    let name_schema = &document["components"]["schemas"]["HelloCreateBody"]["properties"]["name"];
+    assert_eq!(name_schema["minLength"], 1);
+    assert_eq!(name_schema["maxLength"], 100);
+    assert_eq!(name_schema["pattern"], r".*\S.*");
 
     assert_eq!(
         post["requestBody"]["content"]

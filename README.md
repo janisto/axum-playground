@@ -21,7 +21,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - RFC 9457 Problem Details for JSON errors and the same data model encoded as generic CBOR
 - Strict JSON/CBOR negotiation on versioned responses, including `406 Not Acceptable` and exact media-range precedence
 - Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
-- Cursor-based pagination with RFC 8288 `Link` headers on items and GitHub activity endpoints
+- Cursor-based pagination with RFC 8288 `Link` headers on items, GitHub repositories, activity, and tags
 - OpenAPI 3.1 documentation at `/v1/openapi`, including JSON/CBOR request and response media types plus bearer auth, with Swagger UI at `/api-docs`
 - A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedBy` links
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
@@ -83,7 +83,7 @@ See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.r
 
 - Cursor-based tokens for stable pagination
 - Links are emitted through the HTTP `Link` header per RFC 8288
-- Items and GitHub activity both use opaque cursor values rather than exposing storage details
+- Items and all paginated GitHub collections use opaque cursor values rather than exposing storage or upstream page details
 
 ## Configuration
 
@@ -101,7 +101,7 @@ cp .env.example .env
 | --- | --- | --- |
 | `PORT` | Server listen port | `8080` |
 | `FIREBASE_PROJECT_ID` | Firebase project ID and fallback Google project anchor | `demo-test-project` |
-| `APP_ENVIRONMENT` | Environment label used by tracing and local-emulator guardrails | `development` |
+| `APP_ENVIRONMENT` | Runtime environment: `development`, `test`, or `production` | `development` |
 | `GITHUB_TOKEN` | Optional token for higher-rate GitHub API access | - |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
 | `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
@@ -114,6 +114,7 @@ cp .env.example .env
 Notes:
 
 - Emulator hosts must omit the protocol prefix and use loopback, for example `127.0.0.1:9099` and `127.0.0.1:8080`. Emulator configuration is rejected outside `development` and `test`.
+- Unknown `APP_ENVIRONMENT` values fail startup instead of silently selecting development behavior.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
 - Runtime state always constructs real HTTP, authentication, and persistence services. Tests compose explicit doubles; setting `APP_ENVIRONMENT=test` does not activate mock services.
@@ -126,7 +127,7 @@ Notes:
 - Rust 1.97.0 via `rust-toolchain.toml`
 - [Just](https://github.com/casey/just) 1.56.0
 - [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.27.0 for local workflow checks
-- [Firebase CLI](https://firebase.google.com/docs/cli) when running emulator-backed tests
+- [Firebase CLI](https://firebase.google.com/docs/cli) and Java 21 when running emulator-backed tests
 - Podman or Docker for local image builds
 
 Install the workflow linters through Homebrew, as in `axum-observability`:
@@ -222,11 +223,11 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | PATCH | `/v1/profile` | Update user profile, requires auth |
 | DELETE | `/v1/profile` | Delete user profile, requires auth |
 | GET | `/v1/github/owners/{owner}` | Get GitHub owner details |
-| GET | `/v1/github/owners/{owner}/repos` | List repositories for an owner |
+| GET | `/v1/github/owners/{owner}/repos` | List repositories for an owner with cursor pagination |
 | GET | `/v1/github/repos/{owner}/{repo}` | Get GitHub repository details |
 | GET | `/v1/github/repos/{owner}/{repo}/activity` | List repository activity with cursor pagination |
 | GET | `/v1/github/repos/{owner}/{repo}/languages` | Get repository language totals |
-| GET | `/v1/github/repos/{owner}/{repo}/tags` | List repository tags |
+| GET | `/v1/github/repos/{owner}/{repo}/tags` | List repository tags with cursor pagination |
 
 ### Development
 
@@ -251,6 +252,7 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
 | `just test-emulators` | Run the Firestore emulator test when configured |
+| `just test-emulators-ci` | Start the Firestore emulator, run its required integration test, and stop it |
 | `just mutations` | Run the explicit mutation-testing campaign |
 | `just check` | Run `just qa` plus optional emulator coverage |
 | `just ci` | Run `just qa` plus a container build |
@@ -292,7 +294,14 @@ documented in `.cargo/mutants.toml`.
 
 #### Firebase Emulators
 
-Firestore integration tests require the Firestore emulator. Start it before running emulator-backed tests and export its host:
+The Firebase CLI can manage the Firestore emulator lifecycle and run the
+integration test in one command:
+
+```bash
+just test-emulators-ci
+```
+
+To reuse an emulator that is already running, export its host instead:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
@@ -301,9 +310,8 @@ just test-emulators
 
 The emulator test is explicitly ignored by the normal suite, and
 `just test-emulators` skips cleanly when `FIRESTORE_EMULATOR_HOST` is unset.
-GitHub Actions does not currently start Firebase emulators, so emulator-backed
-Firestore coverage is an explicit local gate rather than part of the hosted CI
-claim.
+GitHub Actions runs `just test-emulators-ci` as a required, isolated job using
+the demo project ID, so it cannot contact a live Firestore project.
 
 ## Future Deployment
 
@@ -354,7 +362,7 @@ Production runtime expectations:
 - In-process route behavior and JSON/CBOR negotiation across the public API
 - Problem details, request ID behavior, and 404 or 405 fallback behavior
 - Firebase auth parsing, revocation semantics, and local-only emulator guardrails
-- Firestore-backed profile CRUD via an optional local emulator integration test
+- Firestore-backed profile CRUD through required hosted emulator coverage and an equivalent local command
 - Dependency policy and vulnerability checks through `just deny` and `just audit`
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
 - Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
@@ -367,7 +375,7 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Description |
 | --- | --- |
-| `app-ci.yml` | Build, tests, doctests, and coverage artifact generation |
+| `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, and coverage artifact generation |
 | `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
 | `workflow-security.yml` | Hosted zizmor workflow security analysis |
 | `labeler.yml` | Automatic pull request labeling |

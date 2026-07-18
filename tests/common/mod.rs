@@ -63,7 +63,7 @@ fn base_test_config() -> AppConfig {
     AppConfig {
         port: 8080,
         firebase_project_id: "demo-test-project".to_owned(),
-        app_environment: "test".to_owned(),
+        app_environment: axum_playground::AppEnvironment::Test,
         github_token: None,
         google_application_credentials: None,
         firebase_auth_emulator_host: None,

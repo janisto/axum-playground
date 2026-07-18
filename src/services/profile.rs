@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeMap,
+    error::Error,
+    fmt,
     sync::{Arc, Mutex},
 };
 
@@ -78,14 +80,76 @@ pub struct UpdateProfileParams {
     pub marketing: Option<bool>,
 }
 
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ProfileServiceError {
     #[error("profile not found")]
     NotFound,
     #[error("profile already exists")]
     AlreadyExists,
-    #[error("{0}")]
-    Backend(String),
+    #[error(transparent)]
+    Backend(#[from] ProfileBackendError),
+}
+
+#[derive(Clone)]
+pub struct ProfileBackendError {
+    operation: ProfileOperation,
+    source: Arc<dyn Error + Send + Sync>,
+}
+
+impl ProfileBackendError {
+    pub fn new(operation: ProfileOperation, source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            operation,
+            source: Arc::new(source),
+        }
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> ProfileOperation {
+        self.operation
+    }
+}
+
+impl fmt::Debug for ProfileBackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProfileBackendError")
+            .field("operation", &self.operation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for ProfileBackendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "profile {} backend error", self.operation)
+    }
+}
+
+impl Error for ProfileBackendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileOperation {
+    Initialize,
+    Create,
+    Get,
+    Update,
+    Delete,
+}
+
+impl fmt::Display for ProfileOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Initialize => "initialize",
+            Self::Create => "create",
+            Self::Get => "get",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        })
+    }
 }
 
 impl ProfileService {
@@ -271,7 +335,7 @@ impl FirestoreProfileStore {
                 Ok(created)
             }
             Err(error) => {
-                let error = map_firestore_error(error, ProfileMutation::Create);
+                let error = map_firestore_error(error, ProfileOperation::Create);
                 warn!(
                     operation = "profile.create",
                     reason = profile_error_kind(&error),
@@ -292,7 +356,7 @@ impl FirestoreProfileStore {
             .obj()
             .one(&document_id)
             .await
-            .map_err(|error| map_firestore_error(error, ProfileMutation::Get))?;
+            .map_err(|error| map_firestore_error(error, ProfileOperation::Get))?;
 
         profile.ok_or(ProfileServiceError::NotFound)
     }
@@ -311,7 +375,7 @@ impl FirestoreProfileStore {
             .obj()
             .one(&document_id)
             .await
-            .map_err(|error| map_firestore_error(error, ProfileMutation::Update))?;
+            .map_err(|error| map_firestore_error(error, ProfileOperation::Update))?;
 
         let Some(mut profile) = profile else {
             return Err(ProfileServiceError::NotFound);
@@ -336,7 +400,7 @@ impl FirestoreProfileStore {
                 Ok(updated)
             }
             Err(error) => {
-                let error = map_firestore_error(error, ProfileMutation::Update);
+                let error = map_firestore_error(error, ProfileOperation::Update);
                 warn!(
                     operation = "profile.update",
                     reason = profile_error_kind(&error),
@@ -365,7 +429,7 @@ impl FirestoreProfileStore {
                 Ok(())
             }
             Err(error) => {
-                let error = map_firestore_error(error, ProfileMutation::Delete);
+                let error = map_firestore_error(error, ProfileOperation::Delete);
                 warn!(
                     operation = "profile.delete",
                     reason = profile_error_kind(&error),
@@ -412,7 +476,7 @@ async fn new_firestore_db(
         FirestoreDb::with_options(options).await
     };
 
-    db.map_err(|error| ProfileServiceError::Backend(error.to_string()))
+    db.map_err(|error| ProfileBackendError::new(ProfileOperation::Initialize, error).into())
 }
 
 fn firestore_db_options(project_id: &str, emulator_host: Option<&str>) -> FirestoreDbOptions {
@@ -433,14 +497,6 @@ fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
 
 fn profile_document_id(user_id: &str) -> String {
     format!("uid_{}", URL_SAFE_NO_PAD.encode(user_id))
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ProfileMutation {
-    Create,
-    Get,
-    Update,
-    Delete,
 }
 
 fn build_profile(user_id: &str, params: CreateProfileParams) -> Profile {
@@ -512,28 +568,35 @@ fn timestamp_now() -> String {
         .expect("timestamp should format as rfc3339")
 }
 
-fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> ProfileServiceError {
-    match error {
-        FirestoreError::DataConflictError(_) => match mutation {
-            ProfileMutation::Create => ProfileServiceError::AlreadyExists,
-            ProfileMutation::Update | ProfileMutation::Delete => ProfileServiceError::NotFound,
-            ProfileMutation::Get => ProfileServiceError::Backend(error.to_string()),
-        },
-        FirestoreError::DataNotFoundError(_) => ProfileServiceError::NotFound,
-        other => ProfileServiceError::Backend(other.to_string()),
+fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> ProfileServiceError {
+    match (operation, error) {
+        (ProfileOperation::Create, FirestoreError::DataConflictError(_)) => {
+            ProfileServiceError::AlreadyExists
+        }
+        (
+            ProfileOperation::Update | ProfileOperation::Delete,
+            FirestoreError::DataConflictError(_),
+        )
+        | (_, FirestoreError::DataNotFoundError(_)) => ProfileServiceError::NotFound,
+        (operation, other) => ProfileBackendError::new(operation, other).into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use firestore::errors::{
+        FirestoreDataConflictError, FirestoreDataNotFoundError, FirestoreError,
+        FirestoreErrorPublicGenericDetails,
+    };
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     use crate::{config::AppConfig, error::StartupError};
 
     use super::{
-        CreateProfileParams, FIRESTORE_API_URL, MockProfileService, Profile, ProfileService,
-        ProfileServiceError, UpdateProfileParams, firestore_db_options, profile_document_id,
-        profile_error_kind, timestamp_now, update_field_mask,
+        CreateProfileParams, FIRESTORE_API_URL, MockProfileService, Profile, ProfileBackendError,
+        ProfileOperation, ProfileService, ProfileServiceError, UpdateProfileParams,
+        firestore_db_options, map_firestore_error, profile_document_id, profile_error_kind,
+        timestamp_now, update_field_mask,
     };
 
     #[test]
@@ -571,7 +634,7 @@ mod tests {
         let config = AppConfig {
             port: 8080,
             firebase_project_id: "project".to_owned(),
-            app_environment: "test".to_owned(),
+            app_environment: crate::config::AppEnvironment::Test,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
@@ -647,7 +710,7 @@ mod tests {
             .await
             .expect_err("duplicate create should fail");
 
-        assert_eq!(error, ProfileServiceError::AlreadyExists);
+        assert!(matches!(error, ProfileServiceError::AlreadyExists));
     }
 
     #[tokio::test]
@@ -714,9 +777,67 @@ mod tests {
             "already_exists"
         );
         assert_eq!(
-            profile_error_kind(&ProfileServiceError::Backend("secret detail".to_owned())),
+            profile_error_kind(&ProfileServiceError::Backend(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("secret detail"),
+            ))),
             "backend"
         );
+    }
+
+    #[test]
+    fn backend_errors_retain_typed_sources_without_exposing_details_in_display_or_debug() {
+        use std::error::Error as _;
+
+        let error = ProfileBackendError::new(
+            ProfileOperation::Update,
+            std::io::Error::other("secret database response"),
+        );
+
+        assert_eq!(error.operation(), ProfileOperation::Update);
+        assert_eq!(error.to_string(), "profile update backend error");
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some("secret database response")
+        );
+        assert!(!format!("{error:?}").contains("secret database response"));
+        assert!(format!("{error:?}").contains("operation: Update"));
+    }
+
+    #[test]
+    fn firestore_conflicts_map_by_operation_and_not_found_is_operation_independent() {
+        let conflict = || {
+            FirestoreError::DataConflictError(FirestoreDataConflictError::new(
+                FirestoreErrorPublicGenericDetails::new("ALREADY_EXISTS".to_owned()),
+                "conflict detail".to_owned(),
+            ))
+        };
+
+        assert!(matches!(
+            map_firestore_error(conflict(), ProfileOperation::Create),
+            ProfileServiceError::AlreadyExists
+        ));
+        for operation in [ProfileOperation::Update, ProfileOperation::Delete] {
+            assert!(matches!(
+                map_firestore_error(conflict(), operation),
+                ProfileServiceError::NotFound
+            ));
+        }
+        let backend = map_firestore_error(conflict(), ProfileOperation::Get);
+        assert!(matches!(
+            backend,
+            ProfileServiceError::Backend(error)
+                if error.operation() == ProfileOperation::Get
+        ));
+
+        let missing = FirestoreError::DataNotFoundError(FirestoreDataNotFoundError::new(
+            FirestoreErrorPublicGenericDetails::new("NOT_FOUND".to_owned()),
+            "missing detail".to_owned(),
+        ));
+        assert!(matches!(
+            map_firestore_error(missing, ProfileOperation::Create),
+            ProfileServiceError::NotFound
+        ));
     }
 
     #[tokio::test]

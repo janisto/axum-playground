@@ -55,7 +55,7 @@ impl AppState {
 mod tests {
     use crate::{
         auth::{AuthVerifier, MockAuthVerifier},
-        config::AppConfig,
+        config::{AppConfig, AppEnvironment},
         error::StartupError,
         services::{
             github::{GitHubService, MockGitHubService},
@@ -70,7 +70,7 @@ mod tests {
         let config = AppConfig {
             port: 8080,
             firebase_project_id: "project".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: AppEnvironment::Development,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
@@ -96,7 +96,7 @@ mod tests {
             AppConfig {
                 port: 8080,
                 firebase_project_id: "project".to_owned(),
-                app_environment: "test".to_owned(),
+                app_environment: AppEnvironment::Test,
                 github_token: Some("secret-token".to_owned()),
                 google_application_credentials: Some("/secret/credentials.json".to_owned()),
                 firebase_auth_emulator_host: None,
