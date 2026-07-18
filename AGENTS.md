@@ -67,6 +67,7 @@ Instructions for coding agents working in this repository.
 - Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.
 - Preserve `Vary: Origin, Accept` on application-owned responses and include contract headers such as `Location` and `Link` through shared helpers.
 - Respect a valid incoming `X-Request-Id`, generate a UUIDv4 fallback when it is absent or invalid, and keep request correlation behavior centralized in middleware.
+- Keep outbound GitHub REST requests pinned to API version `2026-03-10` through `X-GitHub-Api-Version`. Do not rely on GitHub's default version. Treat any version change as an explicit upstream contract migration: verify the official schemas and live response shape, then update the production constant, deterministic request and payload tests, README, and this instruction together.
 
 ## Pagination
 

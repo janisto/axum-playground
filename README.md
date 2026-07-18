@@ -119,6 +119,7 @@ Notes:
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
 - Runtime state always constructs real HTTP, authentication, and persistence services. Tests compose explicit doubles; setting `APP_ENVIRONMENT=test` does not activate mock services.
 - `GITHUB_TOKEN` and the credentials path are redacted from `AppConfig` debug output.
+- Outbound GitHub requests pin [`X-GitHub-Api-Version: 2026-03-10`](https://docs.github.com/en/rest/about-the-rest-api/api-versions). This is an application contract rather than an environment setting; upgrading it requires reviewing GitHub payload schemas and the deterministic service tests together.
 
 ## Local Development
 

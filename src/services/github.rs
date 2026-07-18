@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
-const GITHUB_API_VERSION: &str = "2022-11-28";
+const GITHUB_API_VERSION: &str = "2026-03-10";
 
 #[derive(Clone, Debug)]
 pub struct GitHubService {
@@ -1120,10 +1120,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        GITHUB_ACCEPT, GITHUB_API_VERSION, GitHubActivityPayload, GitHubHttpRequest,
-        GitHubHttpResponse, GitHubOwnerPayload, GitHubRepoPayload, GitHubService,
-        GitHubServiceError, GitHubServiceInner, GitHubUpstreamErrorKind, MockGitHubTransport,
-        build_github_request, decode_json, map_http_error,
+        GITHUB_ACCEPT, GitHubActivityPayload, GitHubHttpRequest, GitHubHttpResponse,
+        GitHubOwnerPayload, GitHubRepoPayload, GitHubService, GitHubServiceError,
+        GitHubServiceInner, GitHubUpstreamErrorKind, MockGitHubTransport, build_github_request,
+        decode_json, map_http_error,
     };
 
     fn json_response(status: StatusCode, headers: HeaderMap, body: &Value) -> GitHubHttpResponse {
@@ -1410,13 +1410,16 @@ mod tests {
                 .and_then(|value| value.to_str().ok())
                 == Some(GITHUB_ACCEPT)
         }));
-        assert!(requests.iter().all(|request| {
-            request
-                .headers
-                .get("x-github-api-version")
-                .and_then(|value| value.to_str().ok())
-                == Some(GITHUB_API_VERSION)
-        }));
+        for request in &requests {
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-github-api-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some("2026-03-10"),
+                "every GitHub request must use the locked API version"
+            );
+        }
         assert!(
             requests
                 .iter()
