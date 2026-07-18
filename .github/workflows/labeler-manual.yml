@@ -21,9 +21,10 @@ permissions:
 
 jobs:
   collect-prs:
+    name: Collect pull requests
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # Required to enumerate pull requests.
     runs-on: ubuntu-latest
     outputs:
       pr_numbers: ${{ steps.get_prs.outputs.pr_numbers }}
@@ -60,12 +61,13 @@ jobs:
           INPUT_SCOPE: ${{ github.event.inputs.scope }}
 
   label-prs-matrix:
+    name: Label pull request ${{ matrix.pr }}
     if: needs.collect-prs.outputs.pr_count != '0'
     needs: collect-prs
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
+      issues: write # Required to apply labels through the issues API.
+      pull-requests: write # Required to synchronize pull request labels.
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 10

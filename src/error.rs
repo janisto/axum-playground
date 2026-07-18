@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum StartupError {
     #[error("invalid PORT value: {0}")]
     InvalidPort(String),
+    #[error("invalid APP_ENVIRONMENT value: {0}; expected development, test, or production")]
+    InvalidEnvironment(String),
     #[error("failed to initialize authentication: {0}")]
     AuthInitialization(String),
     #[error("unsafe emulator configuration for {variable}: {host}")]

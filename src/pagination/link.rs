@@ -102,4 +102,14 @@ mod tests {
         assert!(link.contains("cursor="));
         assert!(!link.contains('+'));
     }
+
+    #[test]
+    fn link_header_form_encodes_spaces_in_preserved_filters() {
+        let link = build_link_header("/items", &[("category", "power tools")], Some("next"), None);
+
+        assert_eq!(
+            link,
+            "</items?category=power+tools&cursor=next>; rel=\"next\""
+        );
+    }
 }

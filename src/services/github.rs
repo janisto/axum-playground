@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
 use reqwest::{Client, StatusCode};
 use serde::{
@@ -11,8 +11,7 @@ use utoipa::ToSchema;
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
-const GITHUB_API_VERSION: &str = "2022-11-28";
-const LIST_LIMIT: usize = 30;
+const GITHUB_API_VERSION: &str = "2026-03-10";
 
 #[derive(Clone, Debug)]
 pub struct GitHubService {
@@ -27,20 +26,74 @@ enum GitHubServiceInner {
 
 #[derive(Clone, Debug)]
 struct HttpGitHubService {
-    client: Client,
+    transport: GitHubTransport,
     base_url: String,
     token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum GitHubTransport {
+    Http(Client),
+    #[cfg(test)]
+    Mock(MockGitHubTransport),
+}
+
+struct GitHubHttpRequest {
+    url: reqwest::Url,
+    headers: reqwest::header::HeaderMap,
+    bearer_token: Option<String>,
+}
+
+#[derive(Debug)]
+struct GitHubHttpResponse {
+    status: StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: Vec<u8>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct MockGitHubTransport {
+    responses: Arc<
+        std::sync::Mutex<
+            std::collections::VecDeque<Result<GitHubHttpResponse, GitHubServiceError>>,
+        >,
+    >,
+    requests: Arc<std::sync::Mutex<Vec<RecordedGitHubRequest>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct RecordedGitHubRequest {
+    url: reqwest::Url,
+    headers: reqwest::header::HeaderMap,
+    has_bearer_token: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct MockGitHubService {
     owner: Option<Owner>,
-    repos: Vec<RepoSummary>,
+    repos_page: ListPage<RepoSummary>,
     repo: Option<Repo>,
     activity_page: ActivityPage,
     languages: Vec<Language>,
-    tags: Vec<Tag>,
+    tags_page: ListPage<Tag>,
     error: Option<GitHubServiceError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: String,
+}
+
+impl<T> Default for ListPage<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next_cursor: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
@@ -129,20 +182,25 @@ pub struct Language {
     pub bytes: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum GitHubServiceError {
+    #[error("GitHub resource not found")]
     NotFound,
+    #[error("GitHub access forbidden")]
     Forbidden,
+    #[error("GitHub rate limit exceeded")]
     RateLimited,
+    #[error(transparent)]
     Upstream(GitHubUpstreamError),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct GitHubUpstreamError {
     pub kind: GitHubUpstreamErrorKind,
     pub status: u16,
     pub retry_after: Option<String>,
     pub rate_limit_reset: Option<String>,
+    source: Option<Arc<dyn Error + Send + Sync>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +216,7 @@ impl GitHubService {
     pub fn http(token: Option<String>) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Http(HttpGitHubService {
-                client: Client::new(),
+                transport: GitHubTransport::Http(Client::new()),
                 base_url: DEFAULT_BASE_URL.to_owned(),
                 token,
             })),
@@ -176,8 +234,19 @@ impl GitHubService {
     pub(crate) fn http_with_base_url(base_url: impl Into<String>, token: Option<String>) -> Self {
         Self {
             inner: Arc::new(GitHubServiceInner::Http(HttpGitHubService {
-                client: Client::new(),
+                transport: GitHubTransport::Http(Client::new()),
                 base_url: base_url.into(),
+                token,
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    fn http_with_mock_transport(transport: MockGitHubTransport, token: Option<String>) -> Self {
+        Self {
+            inner: Arc::new(GitHubServiceInner::Http(HttpGitHubService {
+                transport: GitHubTransport::Mock(transport),
+                base_url: "https://api.github.test".to_owned(),
                 token,
             })),
         }
@@ -190,10 +259,15 @@ impl GitHubService {
         }
     }
 
-    pub async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
+    pub async fn list_repos(
+        &self,
+        owner: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
         match self.inner.as_ref() {
-            GitHubServiceInner::Http(service) => service.list_repos(owner).await,
-            GitHubServiceInner::Mock(service) => service.list_repos(owner).await,
+            GitHubServiceInner::Http(service) => service.list_repos(owner, limit, page).await,
+            GitHubServiceInner::Mock(service) => service.list_repos(owner, limit, page).await,
         }
     }
 
@@ -236,10 +310,16 @@ impl GitHubService {
         }
     }
 
-    pub async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
+    pub async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
         match self.inner.as_ref() {
-            GitHubServiceInner::Http(service) => service.list_tags(owner, repo).await,
-            GitHubServiceInner::Mock(service) => service.list_tags(owner, repo).await,
+            GitHubServiceInner::Http(service) => service.list_tags(owner, repo, limit, page).await,
+            GitHubServiceInner::Mock(service) => service.list_tags(owner, repo, limit, page).await,
         }
     }
 }
@@ -260,18 +340,21 @@ impl MockGitHubService {
                 created_at: "2011-01-25T18:44:36Z".to_owned(),
                 updated_at: "2024-06-01T00:00:00Z".to_owned(),
             }),
-            repos: vec![RepoSummary {
-                name: "git-consortium".to_owned(),
-                full_name: "octocat/git-consortium".to_owned(),
-                description: "This repo is for demonstration purposes.".to_owned(),
-                html_url: "https://github.com/octocat/git-consortium".to_owned(),
-                language: "Ruby".to_owned(),
-                stars: 16,
-                forks: 10,
-                open_issues: 0,
-                created_at: "2011-01-25T18:44:36Z".to_owned(),
-                updated_at: "2024-06-01T00:00:00Z".to_owned(),
-            }],
+            repos_page: ListPage {
+                items: vec![RepoSummary {
+                    name: "git-consortium".to_owned(),
+                    full_name: "octocat/git-consortium".to_owned(),
+                    description: "This repo is for demonstration purposes.".to_owned(),
+                    html_url: "https://github.com/octocat/git-consortium".to_owned(),
+                    language: "Ruby".to_owned(),
+                    stars: 16,
+                    forks: 10,
+                    open_issues: 0,
+                    created_at: "2011-01-25T18:44:36Z".to_owned(),
+                    updated_at: "2024-06-01T00:00:00Z".to_owned(),
+                }],
+                next_cursor: String::new(),
+            },
             repo: Some(Repo {
                 repo_summary: RepoSummary {
                     name: "git-consortium".to_owned(),
@@ -308,12 +391,15 @@ impl MockGitHubService {
                 name: "Ruby".to_owned(),
                 bytes: 6789,
             }],
-            tags: vec![Tag {
-                name: "v1.0".to_owned(),
-                commit: TagCommit {
-                    sha: "abc123".to_owned(),
-                },
-            }],
+            tags_page: ListPage {
+                items: vec![Tag {
+                    name: "v1.0".to_owned(),
+                    commit: TagCommit {
+                        sha: "abc123".to_owned(),
+                    },
+                }],
+                next_cursor: String::new(),
+            },
             error: None,
         }
     }
@@ -330,6 +416,18 @@ impl MockGitHubService {
         self
     }
 
+    #[must_use]
+    pub fn with_repos_page(mut self, repos_page: ListPage<RepoSummary>) -> Self {
+        self.repos_page = repos_page;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tags_page(mut self, tags_page: ListPage<Tag>) -> Self {
+        self.tags_page = tags_page;
+        self
+    }
+
     async fn get_owner(&self, owner: &str) -> Result<Owner, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
@@ -341,7 +439,12 @@ impl MockGitHubService {
             .ok_or(GitHubServiceError::NotFound)
     }
 
-    async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
+    async fn list_repos(
+        &self,
+        owner: &str,
+        _limit: usize,
+        _page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
@@ -351,7 +454,7 @@ impl MockGitHubService {
             .as_ref()
             .is_some_and(|current_owner| current_owner.login == owner)
         {
-            Ok(self.repos.clone())
+            Ok(self.repos_page.clone())
         } else {
             Err(GitHubServiceError::NotFound)
         }
@@ -406,7 +509,13 @@ impl MockGitHubService {
         }
     }
 
-    async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
+    async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        _limit: usize,
+        _page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
@@ -414,7 +523,7 @@ impl MockGitHubService {
         if self.repo.as_ref().is_some_and(|current_repo| {
             current_repo.repo_summary.full_name == format!("{owner}/{repo}")
         }) {
-            Ok(self.tags.clone())
+            Ok(self.tags_page.clone())
         } else {
             Err(GitHubServiceError::NotFound)
         }
@@ -423,30 +532,35 @@ impl MockGitHubService {
 
 impl HttpGitHubService {
     async fn get_owner(&self, owner: &str) -> Result<Owner, GitHubServiceError> {
-        let payload: GitHubOwnerPayload = self
-            .send_json(self.client.get(self.url(&["users", owner])))
-            .await?;
+        let payload: GitHubOwnerPayload = self.send_json(self.url(&["users", owner])).await?;
         Ok(payload.into_owner())
     }
 
-    async fn list_repos(&self, owner: &str) -> Result<Vec<RepoSummary>, GitHubServiceError> {
-        let payload: Vec<GitHubRepoSummaryPayload> = self
-            .send_json(
-                self.client
-                    .get(self.url(&["users", owner, "repos"]))
-                    .query(&[("per_page", LIST_LIMIT)]),
-            )
-            .await?;
-        Ok(payload
-            .into_iter()
-            .map(GitHubRepoSummaryPayload::into_repo_summary)
-            .collect())
+    async fn list_repos(
+        &self,
+        owner: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<RepoSummary>, GitHubServiceError> {
+        let url = self.paginated_url(&["users", owner, "repos"], limit, "page", page);
+        let response = self.send(url).await?;
+        let next_cursor = response
+            .headers
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|link| extract_next_query_value(link, "page"));
+        let payload = decode_json::<Vec<GitHubRepoSummaryPayload>>(&response)?;
+        Ok(ListPage {
+            items: payload
+                .into_iter()
+                .map(GitHubRepoSummaryPayload::into_repo_summary)
+                .collect(),
+            next_cursor: next_cursor.unwrap_or_default(),
+        })
     }
 
     async fn get_repo(&self, owner: &str, repo: &str) -> Result<Repo, GitHubServiceError> {
-        let payload: GitHubRepoPayload = self
-            .send_json(self.client.get(self.url(&["repos", owner, repo])))
-            .await?;
+        let payload: GitHubRepoPayload = self.send_json(self.url(&["repos", owner, repo])).await?;
         Ok(payload.into_repo())
     }
 
@@ -457,21 +571,19 @@ impl HttpGitHubService {
         limit: usize,
         after_cursor: &str,
     ) -> Result<ActivityPage, GitHubServiceError> {
-        let mut request = self
-            .client
-            .get(self.url(&["repos", owner, repo, "activity"]))
-            .query(&[("per_page", limit)]);
-        if !after_cursor.is_empty() {
-            request = request.query(&[("after", after_cursor)]);
-        }
-
-        let response = self.send(request).await?;
+        let url = self.paginated_url(
+            &["repos", owner, repo, "activity"],
+            limit,
+            "after",
+            after_cursor,
+        );
+        let response = self.send(url).await?;
         let next_cursor = response
-            .headers()
+            .headers
             .get("link")
             .and_then(|value| value.to_str().ok())
-            .and_then(extract_next_cursor);
-        let payload = decode_json::<Vec<GitHubActivityPayload>>(response).await?;
+            .and_then(|link| extract_next_query_value(link, "after"));
+        let payload = decode_json::<Vec<GitHubActivityPayload>>(&response)?;
 
         Ok(ActivityPage {
             activities: payload
@@ -488,10 +600,7 @@ impl HttpGitHubService {
         repo: &str,
     ) -> Result<Vec<Language>, GitHubServiceError> {
         let payload: BTreeMap<String, i64> = self
-            .send_json(
-                self.client
-                    .get(self.url(&["repos", owner, repo, "languages"])),
-            )
+            .send_json(self.url(&["repos", owner, repo, "languages"]))
             .await?;
 
         let mut languages = payload
@@ -507,53 +616,85 @@ impl HttpGitHubService {
         Ok(languages)
     }
 
-    async fn list_tags(&self, owner: &str, repo: &str) -> Result<Vec<Tag>, GitHubServiceError> {
-        let payload: Vec<GitHubTagPayload> = self
-            .send_json(
-                self.client
-                    .get(self.url(&["repos", owner, repo, "tags"]))
-                    .query(&[("per_page", LIST_LIMIT)]),
-            )
-            .await?;
+    async fn list_tags(
+        &self,
+        owner: &str,
+        repo: &str,
+        limit: usize,
+        page: &str,
+    ) -> Result<ListPage<Tag>, GitHubServiceError> {
+        let url = self.paginated_url(&["repos", owner, repo, "tags"], limit, "page", page);
+        let response = self.send(url).await?;
+        let next_cursor = response
+            .headers
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|link| extract_next_query_value(link, "page"));
+        let payload = decode_json::<Vec<GitHubTagPayload>>(&response)?;
 
-        Ok(payload
-            .into_iter()
-            .map(GitHubTagPayload::into_tag)
-            .collect())
+        Ok(ListPage {
+            items: payload
+                .into_iter()
+                .map(GitHubTagPayload::into_tag)
+                .collect(),
+            next_cursor: next_cursor.unwrap_or_default(),
+        })
     }
 
-    async fn send_json<T>(&self, request: reqwest::RequestBuilder) -> Result<T, GitHubServiceError>
+    async fn send_json<T>(&self, url: reqwest::Url) -> Result<T, GitHubServiceError>
     where
         T: DeserializeOwned,
     {
-        let response = self.send(request).await?;
-        decode_json(response).await
+        let response = self.send(url).await?;
+        decode_json(&response)
     }
 
-    async fn send(
-        &self,
-        request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, GitHubServiceError> {
-        let mut request = request
-            .header(reqwest::header::ACCEPT, GITHUB_ACCEPT)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT)
-            .timeout(std::time::Duration::from_secs(10));
+    async fn send(&self, url: reqwest::Url) -> Result<GitHubHttpResponse, GitHubServiceError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static(GITHUB_ACCEPT),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-github-api-version"),
+            reqwest::header::HeaderValue::from_static(GITHUB_API_VERSION),
+        );
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static(DEFAULT_USER_AGENT),
+        );
+        let response = self
+            .transport
+            .execute(GitHubHttpRequest {
+                url,
+                headers,
+                bearer_token: self.token.clone(),
+            })
+            .await?;
 
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0)))?;
-
-        if response.status().is_success() {
+        if response.status.is_success() {
             Ok(response)
         } else {
-            Err(map_http_error(response.status(), response.headers()))
+            Err(map_http_error(response.status, &response.headers))
         }
+    }
+
+    fn paginated_url(
+        &self,
+        segments: &[&str],
+        limit: usize,
+        cursor_name: &str,
+        cursor: &str,
+    ) -> reqwest::Url {
+        let mut url = self.url(segments);
+        let limit = limit.to_string();
+        let mut query = url.query_pairs_mut();
+        query.append_pair("per_page", &limit);
+        if !cursor.is_empty() {
+            query.append_pair(cursor_name, cursor);
+        }
+        drop(query);
+        url
     }
 
     fn url(&self, segments: &[&str]) -> reqwest::Url {
@@ -567,14 +708,152 @@ impl HttpGitHubService {
     }
 }
 
-impl GitHubUpstreamError {
-    fn upstream(status: u16) -> Self {
-        Self {
-            kind: GitHubUpstreamErrorKind::Upstream,
-            status,
-            retry_after: None,
-            rate_limit_reset: None,
+impl GitHubTransport {
+    async fn execute(
+        &self,
+        request: GitHubHttpRequest,
+    ) -> Result<GitHubHttpResponse, GitHubServiceError> {
+        match self {
+            Self::Http(client) => {
+                let request = build_github_request(client, request)?;
+                let response = client.execute(request).await.map_err(|error| {
+                    GitHubServiceError::Upstream(
+                        GitHubUpstreamError::upstream(0).with_source(error),
+                    )
+                })?;
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body = if status.is_success() {
+                    response
+                        .bytes()
+                        .await
+                        .map_err(|error| {
+                            GitHubServiceError::Upstream(
+                                GitHubUpstreamError::upstream(status.as_u16()).with_source(error),
+                            )
+                        })?
+                        .to_vec()
+                } else {
+                    Vec::new()
+                };
+                Ok(GitHubHttpResponse {
+                    status,
+                    headers,
+                    body,
+                })
+            }
+            #[cfg(test)]
+            Self::Mock(transport) => transport.execute(request),
         }
+    }
+}
+
+fn build_github_request(
+    client: &Client,
+    request: GitHubHttpRequest,
+) -> Result<reqwest::Request, GitHubServiceError> {
+    let mut builder = client
+        .get(request.url)
+        .headers(request.headers)
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(token) = request.bearer_token {
+        builder = builder.bearer_auth(token);
+    }
+    builder.build().map_err(|error| {
+        GitHubServiceError::Upstream(GitHubUpstreamError::upstream(0).with_source(error))
+    })
+}
+
+#[cfg(test)]
+impl MockGitHubTransport {
+    fn new(responses: Vec<Result<GitHubHttpResponse, GitHubServiceError>>) -> Self {
+        Self {
+            responses: Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn execute(
+        &self,
+        request: GitHubHttpRequest,
+    ) -> Result<GitHubHttpResponse, GitHubServiceError> {
+        self.requests
+            .lock()
+            .expect("mock GitHub requests should not be poisoned")
+            .push(RecordedGitHubRequest {
+                url: request.url,
+                headers: request.headers,
+                has_bearer_token: request.bearer_token.is_some(),
+            });
+        self.responses
+            .lock()
+            .expect("mock GitHub responses should not be poisoned")
+            .pop_front()
+            .expect("mock GitHub response should be configured")
+    }
+
+    fn requests(&self) -> Vec<RecordedGitHubRequest> {
+        self.requests
+            .lock()
+            .expect("mock GitHub requests should not be poisoned")
+            .clone()
+    }
+}
+
+impl GitHubUpstreamError {
+    #[must_use]
+    pub fn new(
+        kind: GitHubUpstreamErrorKind,
+        status: u16,
+        retry_after: Option<String>,
+        rate_limit_reset: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            retry_after,
+            rate_limit_reset,
+            source: None,
+        }
+    }
+
+    fn upstream(status: u16) -> Self {
+        Self::new(GitHubUpstreamErrorKind::Upstream, status, None, None)
+    }
+
+    fn with_source(mut self, source: impl Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Arc::new(source));
+        self
+    }
+}
+
+impl fmt::Debug for GitHubUpstreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitHubUpstreamError")
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("retry_after", &self.retry_after)
+            .field("rate_limit_reset", &self.rate_limit_reset)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for GitHubUpstreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "GitHub upstream {:?} error with status {}",
+            self.kind, self.status
+        )
+    }
+}
+
+impl Error for GitHubUpstreamError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
     }
 }
 
@@ -584,41 +863,41 @@ fn map_http_error(status: StatusCode, headers: &reqwest::header::HeaderMap) -> G
     let rate_limit_remaining = header_value(headers, "x-ratelimit-remaining");
 
     if status == StatusCode::NOT_FOUND {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::NotFound,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::NotFound,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
     if status == StatusCode::TOO_MANY_REQUESTS
         || (status == StatusCode::FORBIDDEN
             && (retry_after.is_some() || rate_limit_remaining.as_deref() == Some("0")))
     {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::RateLimited,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::RateLimited,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
     if status == StatusCode::FORBIDDEN {
-        return GitHubServiceError::Upstream(GitHubUpstreamError {
-            kind: GitHubUpstreamErrorKind::Forbidden,
-            status: status.as_u16(),
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::Forbidden,
+            status.as_u16(),
             retry_after,
             rate_limit_reset,
-        });
+        ));
     }
 
-    GitHubServiceError::Upstream(GitHubUpstreamError {
-        kind: GitHubUpstreamErrorKind::Upstream,
-        status: status.as_u16(),
+    GitHubServiceError::Upstream(GitHubUpstreamError::new(
+        GitHubUpstreamErrorKind::Upstream,
+        status.as_u16(),
         retry_after,
         rate_limit_reset,
-    })
+    ))
 }
 
 fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
@@ -628,15 +907,14 @@ fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
         .map(ToOwned::to_owned)
 }
 
-async fn decode_json<T>(response: reqwest::Response) -> Result<T, GitHubServiceError>
+fn decode_json<T>(response: &GitHubHttpResponse) -> Result<T, GitHubServiceError>
 where
     T: DeserializeOwned,
 {
-    let status = response.status().as_u16();
-    response
-        .json::<T>()
-        .await
-        .map_err(|_| GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status)))
+    let status = response.status.as_u16();
+    serde_json::from_slice::<T>(&response.body).map_err(|error| {
+        GitHubServiceError::Upstream(GitHubUpstreamError::upstream(status).with_source(error))
+    })
 }
 
 fn deserialize_http_url<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -660,7 +938,7 @@ where
     Ok(value)
 }
 
-fn extract_next_cursor(link_header: &str) -> Option<String> {
+fn extract_next_query_value(link_header: &str, query_key: &str) -> Option<String> {
     link_header.split(',').find_map(|part| {
         let part = part.trim();
         if !part.contains("rel=\"next\"") {
@@ -671,7 +949,7 @@ fn extract_next_cursor(link_header: &str) -> Option<String> {
         let end = part[start..].find('>')? + start;
         let url = reqwest::Url::parse(&part[start..end]).ok()?;
         url.query_pairs()
-            .find(|(key, _)| key == "after")
+            .find(|(key, _)| key == query_key)
             .map(|(_, value)| value.into_owned())
     })
 }
@@ -838,30 +1116,22 @@ impl GitHubTagCommitPayload {
 
 #[cfg(test)]
 mod tests {
-    use axum::{
-        Json, Router,
-        extract::Query,
-        http::{HeaderMap, Response as HttpResponse, StatusCode, header},
-        routing::get,
-    };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use serde_json::{Value, json};
-    use tokio::net::TcpListener;
 
     use super::{
-        GITHUB_ACCEPT, GitHubActivityPayload, GitHubOwnerPayload, GitHubRepoPayload, GitHubService,
-        GitHubServiceError, GitHubServiceInner, GitHubUpstreamErrorKind, decode_json,
+        GITHUB_ACCEPT, GitHubActivityPayload, GitHubHttpRequest, GitHubHttpResponse,
+        GitHubOwnerPayload, GitHubRepoPayload, GitHubService, GitHubServiceError,
+        GitHubServiceInner, GitHubUpstreamErrorKind, MockGitHubTransport, build_github_request,
+        decode_json, map_http_error,
     };
 
-    async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("server should run");
-        });
-
-        (format!("http://{address}"), handle)
+    fn json_response(status: StatusCode, headers: HeaderMap, body: &Value) -> GitHubHttpResponse {
+        GitHubHttpResponse {
+            status,
+            headers,
+            body: serde_json::to_vec(&body).expect("mock GitHub body should serialize"),
+        }
     }
 
     #[test]
@@ -877,8 +1147,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reqwest_transport_builds_bearer_authenticated_timed_requests() {
+        let request = build_github_request(
+            &reqwest::Client::new(),
+            GitHubHttpRequest {
+                url: reqwest::Url::parse("https://api.github.test/users/octocat")
+                    .expect("test URL should parse"),
+                headers: HeaderMap::new(),
+                bearer_token: Some("test-token".to_owned()),
+            },
+        )
+        .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-token")
+        );
+        assert_eq!(request.timeout(), Some(&std::time::Duration::from_secs(10)));
+    }
+
     #[tokio::test]
     async fn upstream_contract_failure_preserves_successful_http_status() {
+        use std::error::Error as _;
+
         let payload = json!({
             "login": "octocat",
             "name": "The Octocat",
@@ -891,21 +1186,25 @@ mod tests {
             "created_at": "2011-01-25T18:44:36Z",
             "updated_at": "2024-06-01T00:00:00Z"
         });
-        let response = reqwest::Response::from(
-            HttpResponse::builder()
-                .status(StatusCode::OK)
-                .body(serde_json::to_vec(&payload).expect("payload should serialize"))
-                .expect("response should build"),
-        );
+        let response = json_response(StatusCode::OK, HeaderMap::new(), &payload);
 
-        let error = decode_json::<GitHubOwnerPayload>(response)
-            .await
+        let error = decode_json::<GitHubOwnerPayload>(&response)
             .expect_err("non-HTTP avatar URL should violate the upstream contract");
 
+        let GitHubServiceError::Upstream(upstream) = error else {
+            panic!("expected upstream error");
+        };
+        assert_eq!(upstream.kind, GitHubUpstreamErrorKind::Upstream);
+        assert_eq!(upstream.status, 200);
         assert_eq!(
-            error,
-            GitHubServiceError::Upstream(super::GitHubUpstreamError::upstream(200))
+            upstream.to_string(),
+            "GitHub upstream Upstream error with status 200"
         );
+        let debug = format!("{upstream:?}");
+        assert!(debug.contains("kind: Upstream"));
+        assert!(debug.contains("status: 200"));
+        assert!(upstream.source().is_some());
+        assert!(!debug.contains("javascript:alert"));
     }
 
     #[test]
@@ -928,6 +1227,25 @@ mod tests {
             "disabled": false
         });
         assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_invalid_url).is_err());
+
+        let repo_with_non_http_url = json!({
+            "name": "git-consortium",
+            "full_name": "octocat/git-consortium",
+            "description": "demo",
+            "html_url": "ftp://example.com/octocat/git-consortium",
+            "language": "Rust",
+            "stargazers_count": 1,
+            "forks_count": 2,
+            "open_issues_count": 3,
+            "created_at": "2011-01-25T18:44:36Z",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "default_branch": "main",
+            "license": null,
+            "topics": [],
+            "archived": false,
+            "disabled": false
+        });
+        assert!(serde_json::from_value::<GitHubRepoPayload>(repo_with_non_http_url).is_err());
 
         let repo_with_invalid_timestamp = json!({
             "name": "git-consortium",
@@ -974,25 +1292,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_service_parses_owner_and_sets_required_headers() {
-        let app = Router::new().route(
-            "/users/{owner}",
-            get(|headers: HeaderMap| async move {
-                assert_eq!(
-                    headers
-                        .get(header::ACCEPT)
-                        .and_then(|value| value.to_str().ok()),
-                    Some(GITHUB_ACCEPT)
-                );
-                assert!(headers.contains_key(header::USER_AGENT));
-                assert_eq!(
-                    headers
-                        .get("x-github-api-version")
-                        .and_then(|value| value.to_str().ok()),
-                    Some("2022-11-28")
-                );
-
-                Json(json!({
+    async fn http_service_maps_owner_repository_and_tag_payloads() {
+        let mut repos_headers = HeaderMap::new();
+        repos_headers.insert(
+            header::LINK,
+            HeaderValue::from_static(
+                "<https://api.github.test/users/octocat/repos?page=4>; rel=\"next\"",
+            ),
+        );
+        let mut tags_headers = HeaderMap::new();
+        tags_headers.insert(
+            header::LINK,
+            HeaderValue::from_static(
+                "<https://api.github.test/repos/octocat/git-consortium/tags?page=3>; rel=\"next\"",
+            ),
+        );
+        let transport = MockGitHubTransport::new(vec![
+            Ok(json_response(
+                StatusCode::OK,
+                HeaderMap::new(),
+                &json!({
                     "login": "octocat",
                     "name": "The Octocat",
                     "avatar_url": "https://avatars.githubusercontent.com/u/583231",
@@ -1003,52 +1322,165 @@ mod tests {
                     "company": "@github",
                     "created_at": "2011-01-25T18:44:36Z",
                     "updated_at": "2024-06-01T00:00:00Z"
-                }))
-            }),
-        );
-
-        let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, Some("token".to_owned()));
+                }),
+            )),
+            Ok(json_response(
+                StatusCode::OK,
+                repos_headers,
+                &json!([{
+                    "name": "git-consortium",
+                    "full_name": "octocat/git-consortium",
+                    "description": null,
+                    "html_url": "https://github.com/octocat/git-consortium",
+                    "language": null,
+                    "stargazers_count": 10,
+                    "forks_count": 2,
+                    "open_issues_count": 1,
+                    "created_at": "2011-01-25T18:44:36Z",
+                    "updated_at": "2024-06-01T00:00:00Z"
+                }]),
+            )),
+            Ok(json_response(
+                StatusCode::OK,
+                tags_headers,
+                &json!([{
+                    "name": "v1.0.0",
+                    "commit": { "sha": "abc123" }
+                }]),
+            )),
+        ]);
+        let service =
+            GitHubService::http_with_mock_transport(transport.clone(), Some("token".to_owned()));
         let owner = service
             .get_owner("octocat")
             .await
             .expect("owner should load");
-        handle.abort();
-
         assert_eq!(owner.company, "@github");
         assert_eq!(owner.location, "San Francisco");
+
+        let repos = service
+            .list_repos("octocat", 50, "3")
+            .await
+            .expect("repositories should load");
+        assert_eq!(repos.next_cursor, "4");
+        assert_eq!(repos.items.len(), 1);
+        assert_eq!(repos.items[0].name, "git-consortium");
+        assert_eq!(repos.items[0].description, "");
+
+        let tags = service
+            .list_tags("octocat", "git-consortium", 25, "2")
+            .await
+            .expect("tags should load");
+
+        assert_eq!(tags.next_cursor, "3");
+        assert_eq!(tags.items.len(), 1);
+        assert_eq!(tags.items[0].name, "v1.0.0");
+        assert_eq!(tags.items[0].commit.sha, "abc123");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url.path(), "/users/octocat");
+        assert_eq!(
+            requests[1]
+                .url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<std::collections::HashMap<_, _>>(),
+            std::collections::HashMap::from([
+                ("per_page".to_owned(), "50".to_owned()),
+                ("page".to_owned(), "3".to_owned()),
+            ])
+        );
+        assert_eq!(
+            requests[2]
+                .url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<std::collections::HashMap<_, _>>(),
+            std::collections::HashMap::from([
+                ("per_page".to_owned(), "25".to_owned()),
+                ("page".to_owned(), "2".to_owned()),
+            ])
+        );
+        assert!(requests.iter().all(|request| request.has_bearer_token));
+        assert!(requests.iter().all(|request| {
+            request
+                .headers
+                .get(header::ACCEPT)
+                .and_then(|value| value.to_str().ok())
+                == Some(GITHUB_ACCEPT)
+        }));
+        for request in &requests {
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-github-api-version")
+                    .and_then(|value| value.to_str().ok()),
+                Some("2026-03-10"),
+                "every GitHub request must use the locked API version"
+            );
+        }
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.headers.contains_key(header::USER_AGENT))
+        );
+    }
+
+    #[test]
+    fn http_error_mapping_distinguishes_not_found_forbidden_rate_limit_and_upstream() {
+        let headers = HeaderMap::new();
+        for (status, expected) in [
+            (StatusCode::NOT_FOUND, GitHubUpstreamErrorKind::NotFound),
+            (StatusCode::FORBIDDEN, GitHubUpstreamErrorKind::Forbidden),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                GitHubUpstreamErrorKind::RateLimited,
+            ),
+            (StatusCode::BAD_GATEWAY, GitHubUpstreamErrorKind::Upstream),
+        ] {
+            let GitHubServiceError::Upstream(error) = map_http_error(status, &headers) else {
+                panic!("HTTP failures should remain upstream errors");
+            };
+            assert_eq!(error.kind, expected);
+            assert_eq!(error.status, status.as_u16());
+        }
+
+        let mut rate_limit_headers = HeaderMap::new();
+        rate_limit_headers.insert(
+            "x-ratelimit-remaining",
+            "0".parse().expect("header value should parse"),
+        );
+        let GitHubServiceError::Upstream(error) =
+            map_http_error(StatusCode::FORBIDDEN, &rate_limit_headers)
+        else {
+            panic!("HTTP failures should remain upstream errors");
+        };
+        assert_eq!(error.kind, GitHubUpstreamErrorKind::RateLimited);
     }
 
     #[tokio::test]
     async fn http_service_maps_rate_limits_and_extracts_headers() {
-        let app = Router::new().route(
-            "/users/{owner}",
-            get(|| async {
-                (
-                    StatusCode::FORBIDDEN,
-                    [
-                        (header::RETRY_AFTER, "60"),
-                        (
-                            header::HeaderName::from_static("x-ratelimit-reset"),
-                            "1700000000",
-                        ),
-                        (
-                            header::HeaderName::from_static("x-ratelimit-remaining"),
-                            "0",
-                        ),
-                    ],
-                    Json(json!({"message": "rate limited"})),
-                )
-            }),
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        headers.insert(
+            header::HeaderName::from_static("x-ratelimit-reset"),
+            HeaderValue::from_static("1700000000"),
         );
-
-        let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, None);
+        headers.insert(
+            header::HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderValue::from_static("0"),
+        );
+        let transport = MockGitHubTransport::new(vec![Ok(json_response(
+            StatusCode::FORBIDDEN,
+            headers,
+            &json!({"message": "rate limited"}),
+        ))]);
+        let service = GitHubService::http_with_mock_transport(transport, None);
         let error = service
             .get_owner("octocat")
             .await
             .expect_err("request should fail");
-        handle.abort();
 
         match error {
             GitHubServiceError::Upstream(error) => {
@@ -1061,80 +1493,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_service_extracts_next_activity_cursor() {
-        let app = Router::new().route(
-            "/repos/{owner}/{repo}/activity",
-            get(|Query(query): Query<std::collections::HashMap<String, String>>| async move {
-                assert_eq!(query.get("per_page").map(String::as_str), Some("10"));
-
-                (
-                    [(
-                        header::LINK,
-                        "<https://api.github.com/repos/octocat/git-consortium/activity?after=abc123>; rel=\"next\"",
-                    )],
-                    Json(json!([
-                        {
-                            "id": 1,
-                            "actor": {
-                                "login": "octocat",
-                                "avatar_url": "https://avatars.githubusercontent.com/u/583231"
-                            },
-                            "ref": "refs/heads/master",
-                            "timestamp": "2024-01-15T10:30:00Z",
-                            "activity_type": "push"
-                        },
-                        {
-                            "id": 2,
-                            "actor": null,
-                            "ref": "refs/heads/deleted",
-                            "timestamp": "2024-01-15T11:30:00Z",
-                            "activity_type": "branch_deletion"
-                        }
-                    ])),
-                )
-            }),
+    async fn http_service_maps_live_activity_contract_and_extracts_next_cursor() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::LINK,
+            HeaderValue::from_static(
+                "<https://api.github.com/repos/octocat/git-consortium/activity?after=abc123>; rel=\"next\"",
+            ),
         );
-
-        let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, None);
+        let transport = MockGitHubTransport::new(vec![Ok(json_response(
+            StatusCode::OK,
+            headers,
+            &json!([
+                {
+                    "id": 1,
+                    "node_id": "RA_kwDOExample",
+                    "actor": {
+                        "login": "octocat",
+                        "avatar_url": "https://avatars.githubusercontent.com/u/583231",
+                        "type": "User"
+                    },
+                    "ref": "refs/heads/master",
+                    "timestamp": "2024-01-15T10:30:00Z",
+                    "activity_type": "push",
+                    "before": "1111111111111111111111111111111111111111",
+                    "after": "2222222222222222222222222222222222222222"
+                },
+                {
+                    "id": 2,
+                    "actor": null,
+                    "ref": "refs/heads/deleted",
+                    "timestamp": "2024-01-15T11:30:00Z",
+                    "activity_type": "branch_deletion"
+                }
+            ]),
+        ))]);
+        let service = GitHubService::http_with_mock_transport(transport.clone(), None);
         let page = service
             .list_activity("octocat", "git-consortium", 10, "")
             .await
             .expect("activity should load");
-        handle.abort();
 
         assert_eq!(page.next_cursor, "abc123");
         assert_eq!(page.activities.len(), 2);
+        assert_eq!(page.activities[0].id, 1);
         assert_eq!(page.activities[0].actor.as_deref(), Some("octocat"));
+        assert_eq!(page.activities[0].git_ref, "refs/heads/master");
+        assert_eq!(page.activities[0].timestamp, "2024-01-15T10:30:00Z");
+        assert_eq!(page.activities[0].activity_type, "push");
         assert_eq!(
             page.activities[0].actor_avatar_url.as_deref(),
             Some("https://avatars.githubusercontent.com/u/583231")
         );
         assert_eq!(page.activities[1].actor, None);
         assert_eq!(page.activities[1].actor_avatar_url, None);
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        let query = requests[0]
+            .url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(query.get("per_page").map(String::as_str), Some("10"));
+        assert!(!query.contains_key("after"));
     }
 
     #[tokio::test]
     async fn http_service_sorts_languages_by_byte_count() {
-        let app = Router::new().route(
-            "/repos/{owner}/{repo}/languages",
-            get(|| async {
-                Json(Value::Object(
-                    json!({"Ruby": 6789, "Go": 12345})
-                        .as_object()
-                        .expect("object")
-                        .clone(),
-                ))
-            }),
-        );
-
-        let (base_url, handle) = spawn_test_server(app).await;
-        let service = GitHubService::http_with_base_url(base_url, None);
+        let transport = MockGitHubTransport::new(vec![Ok(json_response(
+            StatusCode::OK,
+            HeaderMap::new(),
+            &json!({"Ruby": 6789, "Go": 12345}),
+        ))]);
+        let service = GitHubService::http_with_mock_transport(transport, None);
         let languages = service
             .list_languages("octocat", "git-consortium")
             .await
             .expect("languages should load");
-        handle.abort();
 
         assert_eq!(
             languages.first().map(|language| language.name.as_str()),

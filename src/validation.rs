@@ -1,9 +1,13 @@
 use validator::ValidateEmail;
 
 #[must_use]
-pub fn valid_name(value: &str) -> bool {
+pub fn normalize_name(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let value = value.trim();
     let len = value.chars().count();
-    (1..=100).contains(&len)
+    (1..=100).contains(&len).then(|| value.to_owned())
 }
 
 #[must_use]
@@ -38,14 +42,17 @@ pub fn valid_phone_number(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_name, valid_phone_number};
+    use super::{normalize_name, valid_email, valid_phone_number};
 
     #[test]
-    fn name_validation_matches_length_rules() {
-        assert!(valid_name("a"));
-        assert!(valid_name(&"a".repeat(100)));
-        assert!(!valid_name(""));
-        assert!(!valid_name(&"a".repeat(101)));
+    fn names_are_trimmed_and_reject_blank_control_or_oversized_values() {
+        assert_eq!(normalize_name("  Jane Doe  "), Some("Jane Doe".to_owned()));
+        assert_eq!(normalize_name(&"a".repeat(100)), Some("a".repeat(100)));
+        assert_eq!(normalize_name(""), None);
+        assert_eq!(normalize_name(" \t\n "), None);
+        assert_eq!(normalize_name("Jane\nDoe"), None);
+        assert_eq!(normalize_name("Jane\t"), None);
+        assert_eq!(normalize_name(&"a".repeat(101)), None);
     }
 
     #[test]
@@ -54,5 +61,12 @@ mod tests {
         assert!(!valid_phone_number("358401234567"));
         assert!(!valid_phone_number("+058401234567"));
         assert!(!valid_phone_number("+12"));
+    }
+
+    #[test]
+    fn email_validation_rejects_non_addresses() {
+        assert!(valid_email("user@example.com"));
+        assert!(!valid_email("not-an-email"));
+        assert!(!valid_email("@example.com"));
     }
 }

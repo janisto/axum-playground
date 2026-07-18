@@ -22,15 +22,15 @@ pub use auth::{
     AuthError, AuthVerifier, AuthenticatedUser, FirebaseUser, MockAuthVerifier,
     extract_bearer_token,
 };
-pub use config::AppConfig;
+pub use config::{AppConfig, AppEnvironment};
 pub use services::github::{
     Activity as GitHubActivity, ActivityPage as GitHubActivityPage, GitHubService,
     GitHubServiceError, GitHubUpstreamError, GitHubUpstreamErrorKind, Language as GitHubLanguage,
-    MockGitHubService, Owner as GitHubOwner, Repo as GitHubRepo, RepoSummary as GitHubRepoSummary,
-    Tag as GitHubTag, TagCommit as GitHubTagCommit,
+    ListPage as GitHubListPage, MockGitHubService, Owner as GitHubOwner, Repo as GitHubRepo,
+    RepoSummary as GitHubRepoSummary, Tag as GitHubTag, TagCommit as GitHubTagCommit,
 };
 pub use services::profile::{
-    CreateProfileParams, MockProfileService, Profile, ProfileService, ProfileServiceError,
-    UpdateProfileParams,
+    CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
+    ProfileService, ProfileServiceError, UpdateProfileParams,
 };
 pub use state::AppState;

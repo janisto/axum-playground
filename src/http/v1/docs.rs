@@ -10,6 +10,7 @@ use utoipa_swagger_ui::{Config, SwaggerUi};
 use crate::{
     http::{
         health::__path_health_handler,
+        schema::__path_error_model_schema_handler,
         v1::{
             github::{
                 __path_get_github_owner_handler, __path_get_github_repo_handler,
@@ -33,6 +34,7 @@ use crate::{
 #[openapi(
 paths(
     health_handler,
+    error_model_schema_handler,
     get_hello_handler,
     create_hello_handler,
     list_items_handler,

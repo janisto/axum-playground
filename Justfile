@@ -13,21 +13,25 @@ build:
 
 [group('build')]
 docker-build:
-    {{CONTAINER_RUNTIME}} build -t axum-playground:dev .
+    {{ CONTAINER_RUNTIME }} build -t axum-playground:dev .
 
 [group('run')]
 run:
     cargo run --locked
 
 [group('lifecycle')]
-install:
-    cargo fetch --locked
-    cargo install --locked cargo-nextest --version 0.9.140
-    cargo install --locked cargo-llvm-cov --version 0.8.7
-    cargo install --locked cargo-deny --version 0.20.2
-    cargo install --locked cargo-audit --version 0.22.2
-    cargo install --locked cargo-sort --version 2.1.3
-    cargo install --locked cargo-machete --version 0.9.2
+install: download install-tools
+
+[group('lifecycle')]
+install-tools:
+    cargo install --locked cargo-edit
+    cargo install --locked cargo-nextest
+    cargo install --locked cargo-llvm-cov
+    cargo install --locked cargo-deny
+    cargo install --locked cargo-audit
+    cargo install --locked cargo-mutants
+    cargo install --locked cargo-sort
+    cargo install --locked cargo-machete
 
 [group('lifecycle')]
 download:
@@ -35,7 +39,9 @@ download:
 
 [group('lifecycle')]
 update:
+    cargo upgrade --incompatible allow
     cargo update
+    cargo fetch --locked
 
 [group('qa')]
 fmt:
@@ -76,7 +82,16 @@ test-doc:
 
 [group('test')]
 test-emulators:
-    if [[ -z "${FIRESTORE_EMULATOR_HOST:-}" ]]; then echo "Skipping Firestore emulator tests because FIRESTORE_EMULATOR_HOST is unset."; else cargo test --locked --test firestore_emulator; fi
+    if [[ -z "${FIRESTORE_EMULATOR_HOST:-}" ]]; then echo "Skipping Firestore emulator tests because FIRESTORE_EMULATOR_HOST is unset."; else cargo test --locked --test firestore_emulator -- --ignored; fi
+
+[group('test')]
+test-emulators-ci:
+    firebase emulators:exec --only firestore --project demo-test-project \
+        "cargo test --locked --test firestore_emulator -- --ignored"
+
+[group('adversarial')]
+mutations *args:
+    cargo mutants {{ args }}
 
 [group('qa')]
 coverage-lcov:

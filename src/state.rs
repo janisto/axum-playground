@@ -23,18 +23,9 @@ impl fmt::Debug for AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self, StartupError> {
-        if let Some(host) = config.firestore_emulator_host.as_deref()
-            && !config.emulator_host_is_loopback(host)
-        {
-            return Err(StartupError::UnsafeEmulatorHost {
-                variable: "FIRESTORE_EMULATOR_HOST",
-                host: host.to_owned(),
-            });
-        }
-
+        let profile_service = ProfileService::firestore(&config)?;
         let github_service = GitHubService::http(config.github_token.clone());
         let auth_verifier = AuthVerifier::from_config(&config)?;
-        let profile_service = ProfileService::firestore(&config);
 
         Ok(Self::with_services(
             config,
@@ -62,7 +53,15 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::{config::AppConfig, error::StartupError};
+    use crate::{
+        auth::{AuthVerifier, MockAuthVerifier},
+        config::{AppConfig, AppEnvironment},
+        error::StartupError,
+        services::{
+            github::{GitHubService, MockGitHubService},
+            profile::{MockProfileService, ProfileService},
+        },
+    };
 
     use super::AppState;
 
@@ -71,7 +70,7 @@ mod tests {
         let config = AppConfig {
             port: 8080,
             firebase_project_id: "project".to_owned(),
-            app_environment: "development".to_owned(),
+            app_environment: AppEnvironment::Development,
             github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
@@ -89,5 +88,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn debug_output_keeps_service_state_opaque_and_config_secrets_redacted() {
+        let state = AppState::with_services(
+            AppConfig {
+                port: 8080,
+                firebase_project_id: "project".to_owned(),
+                app_environment: AppEnvironment::Test,
+                github_token: Some("secret-token".to_owned()),
+                google_application_credentials: Some("/secret/credentials.json".to_owned()),
+                firebase_auth_emulator_host: None,
+                firestore_emulator_host: None,
+                google_cloud_project: None,
+                gcp_project: None,
+                gcloud_project: None,
+                project_id: None,
+            },
+            GitHubService::mock(MockGitHubService::demo()),
+            AuthVerifier::mock(MockAuthVerifier::test_user()),
+            ProfileService::mock(MockProfileService::default()),
+        );
+
+        let output = format!("{state:?}");
+        assert!(output.starts_with("AppState { config: AppConfig"));
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("/secret/credentials.json"));
+        assert!(!output.contains("github_service"));
+        assert!(!output.contains("profile_service"));
     }
 }

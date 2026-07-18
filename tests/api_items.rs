@@ -197,6 +197,61 @@ async fn list_items_rejects_non_positive_limit() {
 }
 
 #[tokio::test]
+async fn list_items_enforces_limit_and_cursor_boundaries() {
+    let maximum = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/items?limit=100")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(maximum.status(), StatusCode::OK);
+    let body: ItemsResponse = read_json_body(maximum).await;
+    assert_eq!(body.items.len(), 30);
+
+    let above_maximum = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/items?limit=101")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(above_maximum.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let untyped_cursor = Cursor::new("", "item-001").encode();
+    let untyped = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v1/items?cursor={untyped_cursor}"))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(untyped.status(), StatusCode::BAD_REQUEST);
+
+    let stale_cursor = Cursor::new("item", "item-001").encode();
+    let stale = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v1/items?category=tools&cursor={stale_cursor}"))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(stale.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn openapi_includes_items_path() {
     let response = build_app(test_state())
         .oneshot(

@@ -13,7 +13,7 @@ use crate::{
     http::codec::{BufferedBody, ResponseFormat, decode_request_body, success_response},
     problem::{ProblemResponse, problem_response},
     state::AppState,
-    validation::valid_name,
+    validation::normalize_name,
 };
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
@@ -23,6 +23,7 @@ pub struct HelloData {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct HelloCreateBody {
+    #[schema(min_length = 1, max_length = 100, pattern = r".*\S.*")]
     pub name: String,
 }
 
@@ -82,19 +83,19 @@ pub async fn create_hello_handler(
         Err(error) => return error.into_response(&headers),
     };
 
-    if !valid_name(&input.name) {
+    let Some(name) = normalize_name(&input.name) else {
         return problem_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "validation error",
             &headers,
         );
-    }
+    };
 
     success_response(
         StatusCode::CREATED,
         format,
         &HelloData {
-            message: format!("Hello, {}!", input.name),
+            message: format!("Hello, {name}!"),
         },
     )
 }

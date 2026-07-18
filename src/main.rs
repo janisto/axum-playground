@@ -9,10 +9,8 @@ use axum_playground::{
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let config = AppConfig::from_env()?;
-    init_tracing(&config.app_environment)?;
+    init_tracing(config.app_environment)?;
 
     let state = Arc::new(AppState::new(config.clone())?);
     let app = build_app(state);

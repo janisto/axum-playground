@@ -41,7 +41,7 @@ Instructions for coding agents working in this repository.
 - Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
 - Keep `Cargo.lock` checked in and never edit it manually. Use `cargo update` or `just lock` only for intentional dependency-resolution changes. If unrelated lockfile churn appears, stop instead of hand-editing it away.
-- Keep compatible Cargo requirements in `Cargo.toml`, exact resolution in `Cargo.lock`, Dependabot in `lockfile-only` mode, and repository CLI versions pinned in the `Justfile` and workflows.
+- Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Keep Cargo CLI tool installs aligned between the `Justfile` and workflows; use each tool release's packaged lockfile without hard-coding tool versions that Dependabot cannot maintain.
 - Avoid new dependencies when the standard library or an existing crate fits. Prefer actively maintained, well-documented crates and justify additions against a concrete feature need.
 
 ## Application architecture
@@ -67,6 +67,7 @@ Instructions for coding agents working in this repository.
 - Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.
 - Preserve `Vary: Origin, Accept` on application-owned responses and include contract headers such as `Location` and `Link` through shared helpers.
 - Respect a valid incoming `X-Request-Id`, generate a UUIDv4 fallback when it is absent or invalid, and keep request correlation behavior centralized in middleware.
+- Keep outbound GitHub REST requests pinned to API version `2026-03-10` through `X-GitHub-Api-Version`. Do not rely on GitHub's default version. Treat any version change as an explicit upstream contract migration: verify the official schemas and live response shape, then update the production constant, deterministic request and payload tests, README, and this instruction together.
 
 ## Pagination
 
@@ -93,6 +94,13 @@ Instructions for coding agents working in this repository.
 - Assert observable contracts: exact status, media type, relevant headers, decoded body fields, service side effects, and forbidden calls or leaks. Do not test only that Axum registration succeeds or that a mock returned its configured value.
 - Unit and ordinary integration tests must not contact live Firebase, Firestore, GitHub, or other network services. Emulator coverage stays conditional and isolated in `tests/firestore_emulator.rs`.
 - Run the narrowest relevant target first. For code changes, broaden through `just fmt-check`, `just lint`, `just test`, and `just check` as appropriate. Run `just test-emulators` when Firestore emulator semantics change and `just docker-build` when the container or runtime assembly changes.
+- Run mutation testing when changing production logic or strengthening focused tests. Add tests for meaningful surviving mutants, not equivalent transformations, and keep generated mutation artifacts untracked.
+- Before starting a mutation run, check for active `cargo-mutants` and `just mutations` processes and inspect `mutants.out/lock.json`. The lock file persists after a completed run, so its presence alone does not mean the lock is held; never delete it to bypass a live OS lock or start a competing run. Mutation campaigns can legitimately take a long time, so allow an active healthy run to finish and report progress instead of interrupting it because of elapsed time alone.
+- Preserve any mutation results still needed before starting another run: cargo-mutants rotates `mutants.out` to `mutants.out.old` and deletes the previous old output. Before using `--iterate`, verify that the current `mutants.out` is the intended source run and contains the expected `caught.txt`, `previously_caught.txt`, and `unviable.txt` state.
+- Use four workers for local mutation testing. While iterating on tests, run `just mutations --jobs 4 --iterate` so cargo-mutants skips mutants already caught or found unviable. Treat `--iterate` as a development optimization only: after the implementation and tests stabilize, run `just mutations --jobs 4` without `--iterate` as the authoritative full pass.
+- Treat every missed mutant and timeout as unresolved. Rerun timeouts with `--iterate`, inspect their logs, and adjust timeout or skip configuration only after establishing that the outcome is a tooling limit, intentional hang, or equivalent mutation. Do not report a mutation campaign as clean while unexplained misses or timeouts remain.
+- Do not use `--baseline=skip` for local mutation testing. It is acceptable in CI only after the same checkout has passed the complete test suite; when skipping the baseline, set an explicit test timeout because cargo-mutants cannot derive one from baseline timing.
+- Reserve `--in-place` for disposable single-worker CI checkouts or targeted troubleshooting where reusing the existing target directory is more important than local parallelism; cargo-mutants does not support combining `--in-place` with `--jobs`. Before an `--in-place` run, record the working-tree state and ensure no editor, formatter, test, or second mutation process can modify the checkout concurrently. After the run, inspect `git diff` and search for `/* ~ changed by cargo-mutants ~ */`; if the run was interrupted or failed to restore a file, preserve the intended edits and remove only the mutation before continuing.
 
 ## Agent skills and custom agents
 

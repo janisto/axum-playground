@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum_playground::{
-    AppConfig, CreateProfileParams, ProfileService, ProfileServiceError, UpdateProfileParams,
+    AppConfig, AppState, CreateProfileParams, ProfileServiceError, UpdateProfileParams,
 };
 
 const EMULATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -10,16 +10,20 @@ const PROJECT_ID: &str = "demo-test-project";
 const USER_ID: &str = "tenant/user";
 
 #[tokio::test]
+#[ignore = "requires FIRESTORE_EMULATOR_HOST"]
 async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured() {
-    let Some(emulator_host) = emulator_host() else {
-        return;
-    };
+    let config = emulator_config();
+    let emulator_host = config
+        .firestore_emulator_host
+        .clone()
+        .expect("FIRESTORE_EMULATOR_HOST must be set for the emulator test");
+    let state = AppState::new(config).expect("loopback emulator configuration should be valid");
 
     assert_emulator_reachable(&emulator_host).await;
 
     flush_emulator(&emulator_host, PROJECT_ID).await;
 
-    let service = ProfileService::firestore(&emulator_config());
+    let service = &state.profile_service;
 
     let created = service
         .create(
@@ -54,7 +58,7 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
         )
         .await
         .expect_err("duplicate create should fail against emulator");
-    assert_eq!(duplicate, ProfileServiceError::AlreadyExists);
+    assert!(matches!(duplicate, ProfileServiceError::AlreadyExists));
 
     let fetched = service
         .get(USER_ID)
@@ -88,7 +92,7 @@ async fn firestore_profile_service_crud_round_trip_when_emulator_is_configured()
         .get(USER_ID)
         .await
         .expect_err("deleted profile should not be found");
-    assert_eq!(missing, ProfileServiceError::NotFound);
+    assert!(matches!(missing, ProfileServiceError::NotFound));
 
     flush_emulator(&emulator_host, PROJECT_ID).await;
 }
@@ -97,10 +101,10 @@ fn emulator_config() -> AppConfig {
     AppConfig {
         port: 8080,
         firebase_project_id: PROJECT_ID.to_owned(),
-        app_environment: "test-firestore-emulator".to_owned(),
+        app_environment: axum_playground::AppEnvironment::Test,
         github_token: None,
         google_application_credentials: None,
-        firebase_auth_emulator_host: None,
+        firebase_auth_emulator_host: Some("127.0.0.1:9099".to_owned()),
         firestore_emulator_host: emulator_host(),
         google_cloud_project: Some(PROJECT_ID.to_owned()),
         gcp_project: None,
@@ -116,11 +120,6 @@ fn emulator_host() -> Option<String> {
 }
 
 async fn assert_emulator_reachable(host: &str) {
-    let host = host
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-
     tokio::time::timeout(
         EMULATOR_CONNECT_TIMEOUT,
         tokio::net::TcpStream::connect(host),
@@ -131,10 +130,6 @@ async fn assert_emulator_reachable(host: &str) {
 }
 
 async fn flush_emulator(host: &str, project_id: &str) {
-    let host = host
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
     let url =
         format!("http://{host}/emulator/v1/projects/{project_id}/databases/(default)/documents");
 

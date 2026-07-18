@@ -41,6 +41,9 @@ pub fn decode_cursor(encoded: &str) -> Result<Cursor, InvalidCursor> {
     let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| InvalidCursor)?;
     let decoded = String::from_utf8(decoded).map_err(|_| InvalidCursor)?;
     let (kind, value) = decoded.split_once(':').ok_or(InvalidCursor)?;
+    if kind.is_empty() {
+        return Err(InvalidCursor);
+    }
 
     Ok(Cursor::new(kind, value))
 }
@@ -66,8 +69,13 @@ mod tests {
 
     #[test]
     fn invalid_cursor_rejects_bad_base64_and_missing_separator() {
+        assert_eq!(InvalidCursor.to_string(), "invalid cursor format");
         assert_eq!(decode_cursor("!!!invalid!!!"), Err(InvalidCursor));
         assert_eq!(decode_cursor("dGVzdA"), Err(InvalidCursor));
+        assert_eq!(
+            decode_cursor(&Cursor::new("", "item-001").encode()),
+            Err(InvalidCursor)
+        );
     }
 
     #[test]

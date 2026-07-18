@@ -1,5 +1,10 @@
 mod common;
 
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
+
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -14,7 +19,24 @@ use tower::ServiceExt;
 use crate::common::{read_cbor_body, read_json_body, test_state};
 
 async fn panic_handler() -> &'static str {
-    panic!("boom")
+    panic!("secret-panic-payload")
+}
+
+#[derive(Debug)]
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for LogWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log buffer should lock")
+            .extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 async fn observability_context_handler(context: RequestContext, headers: HeaderMap) -> Json<Value> {
@@ -252,8 +274,16 @@ async fn method_not_allowed_returns_problem_details_and_allow_header() {
     assert_eq!(body.detail.as_deref(), Some("method POST not allowed"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn panic_recovery_returns_internal_server_error_problem() {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer_logs = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || LogWriter(writer_logs.clone()))
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     let extra_routes = Router::new().route("/__panic", get(panic_handler));
 
     let response = build_app_with_routes(test_state(), extra_routes)
@@ -262,6 +292,7 @@ async fn panic_recovery_returns_internal_server_error_problem() {
                 .method(Method::GET)
                 .uri("/__panic")
                 .header("x-request-id", "panic-id")
+                .header(header::ORIGIN, "https://example.com")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -276,10 +307,36 @@ async fn panic_recovery_returns_internal_server_error_problem() {
             .and_then(|value| value.to_str().ok()),
         Some("panic-id")
     );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 
     let body: ProblemDetails = read_json_body(response).await;
     assert_eq!(body.title.as_deref(), Some("Internal Server Error"));
     assert_eq!(body.detail.as_deref(), Some("internal server error"));
+
+    let logs = String::from_utf8(logs.lock().expect("log buffer should lock").clone())
+        .expect("logs should be UTF-8");
+    assert!(logs.contains("request panicked"));
+    assert!(!logs.contains("secret-panic-payload"));
 }
 
 #[tokio::test]
@@ -324,6 +381,57 @@ async fn cors_preflight_uses_api_defaults() {
     assert!(allowed_headers.contains("traceparent"));
     assert!(allowed_headers.contains("tracestate"));
     assert!(allowed_headers.contains("x-request-id"));
+}
+
+#[tokio::test]
+async fn cors_exposes_authentication_and_method_contract_headers() {
+    let unauthorized = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/profile")
+                .header(header::ORIGIN, "https://example.com")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        unauthorized
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+    let exposed_headers = unauthorized
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS response should list exposed headers");
+    assert!(exposed_headers.contains("www-authenticate"));
+
+    let method_not_allowed = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/health")
+                .header(header::ORIGIN, "https://example.com")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(method_not_allowed.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(method_not_allowed.headers().contains_key(header::ALLOW));
+    let exposed_headers = method_not_allowed
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS response should list exposed headers");
+    assert!(exposed_headers.contains("allow"));
 }
 
 #[tokio::test]
