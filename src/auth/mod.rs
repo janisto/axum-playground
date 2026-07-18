@@ -117,13 +117,6 @@ struct IdentityPlatformLookupClient {
 pub struct AuthenticatedUser(pub FirebaseUser);
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum AudienceClaim {
-    One(String),
-    Many(Vec<String>),
-}
-
-#[derive(Clone, Debug, Deserialize)]
 struct FirebaseClaims {
     sub: String,
     email: Option<String>,
@@ -133,7 +126,7 @@ struct FirebaseClaims {
     iat: Option<u64>,
     auth_time: Option<u64>,
     iss: Option<String>,
-    aud: Option<AudienceClaim>,
+    aud: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -414,15 +407,6 @@ impl FirebaseClaims {
     }
 }
 
-impl AudienceClaim {
-    fn contains(&self, value: &str) -> bool {
-        match self {
-            Self::One(current) => current == value,
-            Self::Many(current) => current.iter().any(|entry| entry == value),
-        }
-    }
-}
-
 pub fn extract_bearer_token(header_value: &str) -> Result<String, AuthError> {
     let header_value = header_value.trim();
     if header_value.is_empty() {
@@ -511,7 +495,7 @@ fn validate_common_claims_at(
     if issuer != expected_issuer(project_id) {
         return Err(AuthError::InvalidToken);
     }
-    if !audience.contains(project_id) {
+    if audience != project_id {
         return Err(AuthError::InvalidToken);
     }
 
@@ -658,11 +642,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AudienceClaim, AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaims,
-        FirebaseUser, GoogleJwk, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS,
-        cache_ttl, categorize_auth_error, expected_issuer, extract_bearer_token,
-        firebase_validation, map_jwt_error, require_successful_response, rsa_key_id,
-        token_is_revoked, validate_common_claims_at,
+        AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaims, FirebaseUser,
+        GoogleJwk, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, cache_ttl,
+        categorize_auth_error, expected_issuer, extract_bearer_token, firebase_validation,
+        map_jwt_error, require_successful_response, rsa_key_id, token_is_revoked,
+        validate_common_claims_at,
     };
     use crate::{config::AppConfig, error::StartupError};
 
@@ -833,16 +817,7 @@ mod tests {
         );
 
         claims = valid_claims(now);
-        claims.aud = Some(AudienceClaim::Many(vec![
-            "other-project".to_owned(),
-            "demo-test-project".to_owned(),
-        ]));
-        assert_eq!(
-            validate_common_claims_at(&claims, "demo-test-project", now),
-            Ok(())
-        );
-
-        claims.aud = Some(AudienceClaim::Many(vec!["other-project".to_owned()]));
+        claims.aud = Some("other-project".to_owned());
         assert_eq!(
             validate_common_claims_at(&claims, "demo-test-project", now),
             Err(AuthError::InvalidToken)
@@ -1036,6 +1011,35 @@ mod tests {
         assert_eq!(error, AuthError::TokenExpired);
     }
 
+    #[tokio::test]
+    async fn emulator_verifier_rejects_multi_valued_audience() {
+        let verifier = EmulatorAuthVerifier {
+            project_id: "demo-test-project".to_owned(),
+        };
+        let now = super::unix_timestamp_now();
+
+        let token = unsigned_token(
+            json!({
+                "alg": "RS256",
+                "typ": "JWT"
+            }),
+            json!({
+                "sub": "user-123",
+                "aud": ["other-project", "demo-test-project"],
+                "iss": expected_issuer("demo-test-project"),
+                "iat": now - 300,
+                "auth_time": now - 300,
+                "exp": now + 3600
+            }),
+        );
+
+        let error = verifier
+            .verify(&token)
+            .await
+            .expect_err("array-valued Firebase audience should fail");
+        assert_eq!(error, AuthError::InvalidToken);
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the test helper consumes inline JSON fixtures"
@@ -1057,7 +1061,7 @@ mod tests {
             iat: Some(now),
             auth_time: Some(now),
             iss: Some(expected_issuer("demo-test-project")),
-            aud: Some(AudienceClaim::One("demo-test-project".to_owned())),
+            aud: Some("demo-test-project".to_owned()),
         }
     }
 

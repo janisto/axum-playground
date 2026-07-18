@@ -23,18 +23,9 @@ impl fmt::Debug for AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self, StartupError> {
-        if let Some(host) = config.firestore_emulator_host.as_deref()
-            && !config.emulator_host_is_loopback(host)
-        {
-            return Err(StartupError::UnsafeEmulatorHost {
-                variable: "FIRESTORE_EMULATOR_HOST",
-                host: host.to_owned(),
-            });
-        }
-
+        let profile_service = ProfileService::firestore(&config)?;
         let github_service = GitHubService::http(config.github_token.clone());
         let auth_verifier = AuthVerifier::from_config(&config)?;
-        let profile_service = ProfileService::firestore(&config);
 
         Ok(Self::with_services(
             config,

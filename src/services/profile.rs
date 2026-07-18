@@ -14,7 +14,7 @@ use tokio::sync::OnceCell;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
-use crate::config::AppConfig;
+use crate::{config::AppConfig, error::StartupError};
 
 const PROFILES_COLLECTION: &str = "profiles";
 const FIRESTORE_API_URL: &str = "https://firestore.googleapis.com";
@@ -89,11 +89,19 @@ pub enum ProfileServiceError {
 }
 
 impl ProfileService {
-    #[must_use]
-    pub fn firestore(config: &AppConfig) -> Self {
+    pub fn firestore(config: &AppConfig) -> Result<Self, StartupError> {
+        if let Some(host) = config.firestore_emulator_host.as_deref()
+            && !config.emulator_host_is_loopback(host)
+        {
+            return Err(StartupError::UnsafeEmulatorHost {
+                variable: "FIRESTORE_EMULATOR_HOST",
+                host: host.to_owned(),
+            });
+        }
+
         let project_id = config.resolved_google_project_id().to_owned();
 
-        Self {
+        Ok(Self {
             inner: Arc::new(ProfileServiceInner::Firestore(Box::new(
                 FirestoreProfileStore {
                     project_id,
@@ -101,7 +109,7 @@ impl ProfileService {
                     db: Arc::new(OnceCell::new()),
                 },
             ))),
-        }
+        })
     }
 
     #[must_use]
@@ -520,6 +528,8 @@ fn map_firestore_error(error: FirestoreError, mutation: ProfileMutation) -> Prof
 mod tests {
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+    use crate::{config::AppConfig, error::StartupError};
+
     use super::{
         CreateProfileParams, FIRESTORE_API_URL, MockProfileService, Profile, ProfileService,
         ProfileServiceError, UpdateProfileParams, firestore_db_options, profile_document_id,
@@ -554,6 +564,31 @@ mod tests {
             emulator.firebase_api_url.as_deref(),
             Some("http://127.0.0.1:8085")
         );
+    }
+
+    #[test]
+    fn firestore_service_rejects_unsafe_emulator_host_before_initialization() {
+        let config = AppConfig {
+            port: 8080,
+            firebase_project_id: "project".to_owned(),
+            app_environment: "test".to_owned(),
+            github_token: None,
+            google_application_credentials: None,
+            firebase_auth_emulator_host: None,
+            firestore_emulator_host: Some("firestore.example.com:8080".to_owned()),
+            google_cloud_project: None,
+            gcp_project: None,
+            gcloud_project: None,
+            project_id: None,
+        };
+
+        assert!(matches!(
+            ProfileService::firestore(&config),
+            Err(StartupError::UnsafeEmulatorHost {
+                variable: "FIRESTORE_EMULATOR_HOST",
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
