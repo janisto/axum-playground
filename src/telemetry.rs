@@ -1,12 +1,13 @@
-use axum_observability::{FieldConvention, ObservabilityConfig};
+use axum_observability::{FieldConvention, ObservabilityConfig, TraceContextLevel};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::{config::AppEnvironment, error::StartupError};
 
-pub(crate) fn observability_config() -> ObservabilityConfig {
+/// Returns the finalized configuration shared by the JSON formatter and HTTP middleware.
+pub fn observability_config() -> ObservabilityConfig {
     ObservabilityConfig::default()
         .with_field_convention(FieldConvention::Gcp)
-        .with_raw_path(true)
+        .with_trace_context_level(TraceContextLevel::Level1)
 }
 
 pub fn init_tracing(app_environment: AppEnvironment) -> Result<(), StartupError> {
@@ -30,6 +31,8 @@ fn default_filter(app_environment: AppEnvironment) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use axum_observability::TraceContextLevel;
+
     use crate::config::AppEnvironment;
 
     use super::{default_filter, observability_config};
@@ -51,10 +54,10 @@ mod tests {
     }
 
     #[test]
-    fn observability_uses_gcp_fields_and_captures_raw_paths() {
-        let debug = format!("{:?}", observability_config());
-
-        assert!(debug.contains("field_convention: Gcp"));
-        assert!(debug.contains("raw_path: true"));
+    fn observability_uses_level_one_trace_context() {
+        assert_eq!(
+            observability_config().trace_context_level(),
+            TraceContextLevel::Level1
+        );
     }
 }
