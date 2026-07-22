@@ -154,9 +154,9 @@ dependencies = [
 
 [[package]]
 name = "axum-observability"
-version = "1.0.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae3185389ccc74ce4e3d4462482aa574103458c35ac884d1f5422f90707acf18"
+checksum = "8bc5f2a0a92655862a35924fbca2b01a3ebe1e2b980db5d68f7b45374f68e7fa"
 dependencies = [
  "axum",
  "http-body",

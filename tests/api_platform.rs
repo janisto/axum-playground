@@ -7,14 +7,18 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     http::{HeaderMap, Method, Request, StatusCode, header},
     routing::{get, post},
 };
 use axum_observability::RequestContext;
-use axum_playground::{build_app, build_app_with_routes, problem::ProblemDetails};
+use axum_playground::{
+    build_app, build_app_with_routes, problem::ProblemDetails, telemetry::observability_config,
+};
+use futures_util::stream;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use tracing_subscriber::prelude::*;
 
 use crate::common::{read_cbor_body, read_json_body, test_state};
 
@@ -55,6 +59,13 @@ async fn raw_body_handler(request: axum::extract::Request) -> StatusCode {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::PAYLOAD_TOO_LARGE,
     }
+}
+
+async fn failing_body_handler() -> axum::response::Response {
+    let body = Body::from_stream(stream::once(async {
+        Err::<Bytes, _>(std::io::Error::other("secret-body-error"))
+    }));
+    axum::response::Response::new(body)
 }
 
 async fn assert_payload_too_large_problem(response: axum::response::Response) {
@@ -141,6 +152,135 @@ async fn observability_context_replaces_duplicate_request_ids_once() {
     assert_eq!(body["requestHeader"], request_id);
     assert_eq!(body["correlationId"], request_id);
     assert!(body["traceId"].is_null());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn observability_v2_emits_stable_gcp_records_without_concrete_paths() {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer_logs = logs.clone();
+    let config = observability_config();
+    let subscriber = tracing_subscriber::registry()
+        .with(config.json_layer(move || LogWriter(writer_logs.clone())));
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let extra_routes = Router::new()
+        .route(
+            "/__observability/{item}",
+            get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route("/__observability-error", get(failing_body_handler));
+    let app = build_app_with_routes(test_state(), extra_routes);
+    let trace_id = "0af7651916cd43dd8448eb211c80319c";
+
+    let completed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/__observability/private-item?secret=value")
+                .header("x-request-id", "completed-id")
+                .header("traceparent", format!("00-{trace_id}-b7ad6b7169203331-03"))
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(completed.status(), StatusCode::NO_CONTENT);
+    to_bytes(completed.into_body(), 1024)
+        .await
+        .expect("response body should complete");
+
+    let failed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/__observability-error")
+                .header("x-request-id", "failed-id")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(failed.status(), StatusCode::OK);
+    to_bytes(failed.into_body(), 1024)
+        .await
+        .expect_err("response body should fail");
+
+    let abandoned = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/health")
+                .header("x-request-id", "abandoned-id")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(abandoned.status(), StatusCode::OK);
+    drop(abandoned);
+
+    let serialized_records =
+        String::from_utf8(logs.lock().expect("log buffer should lock").clone())
+            .expect("logs should be UTF-8");
+    assert!(!serialized_records.contains("private-item"));
+    assert!(!serialized_records.contains("secret=value"));
+    assert!(!serialized_records.contains("secret-body-error"));
+    let records = serialized_records
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("log line should be JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records.len(),
+        3,
+        "each request should emit one terminal record"
+    );
+
+    let completed = &records[0];
+    assert_eq!(completed["target"], "axum_observability::access");
+    assert_eq!(completed["severity"], "INFO");
+    assert_eq!(completed["message"], "request completed");
+    assert_eq!(completed["request_id"], "completed-id");
+    assert_eq!(completed["correlation_id"], trace_id);
+    assert_eq!(completed["trace_id"], trace_id);
+    assert_eq!(completed["parent_id"], "b7ad6b7169203331");
+    assert_eq!(completed["trace_flags"], "03");
+    assert!(completed["trace_flags"].is_string());
+    assert_eq!(completed["trace_sampled"], true);
+    assert_eq!(completed["logging.googleapis.com/trace"], trace_id);
+    assert_eq!(completed["logging.googleapis.com/trace_sampled"], true);
+    assert!(completed.get("trace_id_random").is_none());
+    assert_eq!(completed["method"], "GET");
+    assert_eq!(completed["path_template"], "/__observability/{item}");
+    assert!(completed.get("path").is_none());
+    assert_eq!(completed["status"], StatusCode::NO_CONTENT.as_u16());
+    assert!(completed["duration_ms"].is_number());
+    assert!(completed.get("terminal_reason").is_none());
+    assert!(completed.get("error").is_none());
+    assert_eq!(completed["httpRequest"]["requestMethod"], "GET");
+    assert_eq!(
+        completed["httpRequest"]["status"],
+        StatusCode::NO_CONTENT.as_u16()
+    );
+    assert!(completed["httpRequest"].get("requestUrl").is_none());
+
+    let failed = &records[1];
+    assert_eq!(failed["severity"], "ERROR");
+    assert_eq!(failed["request_id"], "failed-id");
+    assert_eq!(failed["path_template"], "/__observability-error");
+    assert_eq!(failed["status"], StatusCode::OK.as_u16());
+    assert_eq!(failed["terminal_reason"], "body_error");
+    assert!(failed.get("error").is_none());
+
+    let abandoned = &records[2];
+    assert_eq!(abandoned["severity"], "ERROR");
+    assert_eq!(abandoned["request_id"], "abandoned-id");
+    assert_eq!(abandoned["path_template"], "/health");
+    assert_eq!(abandoned["status"], StatusCode::OK.as_u16());
+    assert_eq!(abandoned["terminal_reason"], "response_dropped");
+    assert!(abandoned.get("error").is_none());
+    assert!(abandoned.get("path").is_none());
+    assert!(abandoned["httpRequest"].get("requestUrl").is_none());
 }
 
 #[tokio::test]

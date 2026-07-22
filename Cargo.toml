@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 axum = "0.8.9"
-axum-observability = "1.0.0"
+axum-observability = "2.0.0"
 base64 = "0.22.1"
 ciborium = "0.2.2"
 firestore = { version = "0.49.0", default-features = false, features = ["tls-webpki-roots"] }
