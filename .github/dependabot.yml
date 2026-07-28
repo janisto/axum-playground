@@ -8,7 +8,7 @@ updates:
       time: "08:00"
       timezone: "Europe/Helsinki"
     cooldown:
-      default-days: 7
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:
@@ -28,7 +28,7 @@ updates:
       time: "08:30"
       timezone: "Europe/Helsinki"
     cooldown:
-      default-days: 7
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:
@@ -53,7 +53,7 @@ updates:
       time: "09:00"
       timezone: "Europe/Helsinki"
     cooldown:
-      default-days: 7
+      default-days: 1
     commit-message:
       prefix: "chore(deps)"
     labels:
