@@ -22,7 +22,7 @@ use crate::{
             profile::{
                 __path_create_profile_handler, __path_delete_profile_handler,
                 __path_get_profile_handler, __path_update_profile_handler,
-                AuthenticationUnavailableProblemResponse, UnauthorizedProblemResponse,
+                DependencyUnavailableProblemResponse, UnauthorizedProblemResponse,
             },
         },
     },
@@ -54,7 +54,7 @@ components(
     responses(
         ProblemResponse,
         UnauthorizedProblemResponse,
-        AuthenticationUnavailableProblemResponse
+        DependencyUnavailableProblemResponse
     )
 ),
 modifiers(&SecurityAddon)

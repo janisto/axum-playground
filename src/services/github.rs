@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, error::Error, fmt, sync::Arc};
 
+use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -12,6 +13,7 @@ const DEFAULT_BASE_URL: &str = "https://api.github.com";
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION: &str = "2026-03-10";
+const MAX_GITHUB_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct GitHubService {
@@ -24,7 +26,7 @@ enum GitHubServiceInner {
     Mock(Box<MockGitHubService>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct HttpGitHubService {
     transport: GitHubTransport,
     base_url: String,
@@ -109,8 +111,10 @@ pub struct Owner {
     pub blog: String,
     pub company: String,
     #[serde(rename = "createdAt")]
+    #[schema(format = DateTime)]
     pub created_at: String,
     #[serde(rename = "updatedAt")]
+    #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
@@ -128,8 +132,10 @@ pub struct RepoSummary {
     #[serde(rename = "openIssues")]
     pub open_issues: i32,
     #[serde(rename = "createdAt")]
+    #[schema(format = DateTime)]
     pub created_at: String,
     #[serde(rename = "updatedAt")]
+    #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
@@ -158,6 +164,7 @@ pub struct Activity {
     pub actor: Option<String>,
     #[serde(rename = "ref")]
     pub git_ref: String,
+    #[schema(format = DateTime)]
     pub timestamp: String,
     #[serde(rename = "activityType")]
     pub activity_type: String,
@@ -206,6 +213,7 @@ pub struct GitHubUpstreamError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubUpstreamErrorKind {
     NotFound,
+    InvalidRequest,
     Forbidden,
     RateLimited,
     Upstream,
@@ -675,7 +683,11 @@ impl HttpGitHubService {
         if response.status.is_success() {
             Ok(response)
         } else {
-            Err(map_http_error(response.status, &response.headers))
+            Err(map_http_error(
+                response.status,
+                &response.headers,
+                &response.body,
+            ))
         }
     }
 
@@ -723,19 +735,7 @@ impl GitHubTransport {
                 })?;
                 let status = response.status();
                 let headers = response.headers().clone();
-                let body = if status.is_success() {
-                    response
-                        .bytes()
-                        .await
-                        .map_err(|error| {
-                            GitHubServiceError::Upstream(
-                                GitHubUpstreamError::upstream(status.as_u16()).with_source(error),
-                            )
-                        })?
-                        .to_vec()
-                } else {
-                    Vec::new()
-                };
+                let body = read_response_body(response, status).await?;
                 Ok(GitHubHttpResponse {
                     status,
                     headers,
@@ -746,6 +746,30 @@ impl GitHubTransport {
             Self::Mock(transport) => transport.execute(request),
         }
     }
+}
+
+async fn read_response_body(
+    response: reqwest::Response,
+    status: StatusCode,
+) -> Result<Vec<u8>, GitHubServiceError> {
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|error| {
+            GitHubServiceError::Upstream(
+                GitHubUpstreamError::upstream(status.as_u16()).with_source(error),
+            )
+        })?;
+        if chunk.len() > MAX_GITHUB_RESPONSE_BODY_BYTES.saturating_sub(body.len()) {
+            return Err(GitHubServiceError::Upstream(
+                GitHubUpstreamError::upstream(status.as_u16()).with_source(std::io::Error::other(
+                    "GitHub response exceeded the configured body limit",
+                )),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn build_github_request(
@@ -827,6 +851,17 @@ impl GitHubUpstreamError {
     }
 }
 
+impl fmt::Debug for HttpGitHubService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpGitHubService")
+            .field("transport", &self.transport)
+            .field("base_url", &self.base_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 impl fmt::Debug for GitHubUpstreamError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -857,10 +892,22 @@ impl Error for GitHubUpstreamError {
     }
 }
 
-fn map_http_error(status: StatusCode, headers: &reqwest::header::HeaderMap) -> GitHubServiceError {
-    let retry_after = header_value(headers, reqwest::header::RETRY_AFTER.as_str());
+fn map_http_error(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+) -> GitHubServiceError {
+    let mut retry_after = header_value(headers, reqwest::header::RETRY_AFTER.as_str());
     let rate_limit_reset = header_value(headers, "x-ratelimit-reset");
     let rate_limit_remaining = header_value(headers, "x-ratelimit-remaining");
+    let is_secondary_rate_limit = serde_json::from_slice::<GitHubErrorPayload>(body)
+        .ok()
+        .and_then(|payload| payload.message)
+        .is_some_and(|message| {
+            message
+                .to_ascii_lowercase()
+                .contains("secondary rate limit")
+        });
 
     if status == StatusCode::NOT_FOUND {
         return GitHubServiceError::Upstream(GitHubUpstreamError::new(
@@ -871,10 +918,27 @@ fn map_http_error(status: StatusCode, headers: &reqwest::header::HeaderMap) -> G
         ));
     }
 
+    if status == StatusCode::UNPROCESSABLE_ENTITY {
+        return GitHubServiceError::Upstream(GitHubUpstreamError::new(
+            GitHubUpstreamErrorKind::InvalidRequest,
+            status.as_u16(),
+            retry_after,
+            rate_limit_reset,
+        ));
+    }
+
     if status == StatusCode::TOO_MANY_REQUESTS
         || (status == StatusCode::FORBIDDEN
-            && (retry_after.is_some() || rate_limit_remaining.as_deref() == Some("0")))
+            && (retry_after.is_some()
+                || rate_limit_remaining.as_deref() == Some("0")
+                || is_secondary_rate_limit))
     {
+        if retry_after.is_none()
+            && rate_limit_reset.is_none()
+            && (status == StatusCode::TOO_MANY_REQUESTS || is_secondary_rate_limit)
+        {
+            retry_after = Some("60".to_owned());
+        }
         return GitHubServiceError::Upstream(GitHubUpstreamError::new(
             GitHubUpstreamErrorKind::RateLimited,
             status.as_u16(),
@@ -898,6 +962,11 @@ fn map_http_error(status: StatusCode, headers: &reqwest::header::HeaderMap) -> G
         retry_after,
         rate_limit_reset,
     ))
+}
+
+#[derive(Deserialize)]
+struct GitHubErrorPayload {
+    message: Option<String>,
 }
 
 fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
@@ -1122,8 +1191,8 @@ mod tests {
     use super::{
         GITHUB_ACCEPT, GitHubActivityPayload, GitHubHttpRequest, GitHubHttpResponse,
         GitHubOwnerPayload, GitHubRepoPayload, GitHubService, GitHubServiceError,
-        GitHubServiceInner, GitHubUpstreamErrorKind, MockGitHubTransport, build_github_request,
-        decode_json, map_http_error,
+        GitHubServiceInner, GitHubUpstreamErrorKind, MAX_GITHUB_RESPONSE_BODY_BYTES,
+        MockGitHubTransport, build_github_request, decode_json, map_http_error, read_response_body,
     };
 
     fn json_response(status: StatusCode, headers: HeaderMap, body: &Value) -> GitHubHttpResponse {
@@ -1148,6 +1217,15 @@ mod tests {
     }
 
     #[test]
+    fn service_debug_output_redacts_the_bearer_token() {
+        let service = GitHubService::http(Some("github-secret-token".to_owned()));
+        let debug = format!("{service:?}");
+
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("github-secret-token"));
+    }
+
+    #[test]
     fn reqwest_transport_builds_bearer_authenticated_timed_requests() {
         let request = build_github_request(
             &reqwest::Client::new(),
@@ -1168,6 +1246,36 @@ mod tests {
             Some("Bearer test-token")
         );
         assert_eq!(request.timeout(), Some(&std::time::Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn response_body_reader_enforces_the_exact_four_mebibyte_limit() {
+        assert_eq!(MAX_GITHUB_RESPONSE_BODY_BYTES, 4_194_304);
+
+        let at_limit = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .body(vec![0; 4_194_304])
+                .expect("response should build"),
+        );
+        let body = read_response_body(at_limit, StatusCode::OK)
+            .await
+            .expect("a response at the limit should be accepted");
+        assert_eq!(body.len(), 4_194_304);
+
+        let over_limit = reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .body(vec![0; 4_194_305])
+                .expect("response should build"),
+        );
+        let error = read_response_body(over_limit, StatusCode::OK)
+            .await
+            .expect_err("a response over the limit should be rejected");
+        let GitHubServiceError::Upstream(error) = error else {
+            panic!("body limit failures should remain upstream errors");
+        };
+        assert_eq!(error.status, StatusCode::OK.as_u16());
     }
 
     #[tokio::test]
@@ -1432,6 +1540,10 @@ mod tests {
         let headers = HeaderMap::new();
         for (status, expected) in [
             (StatusCode::NOT_FOUND, GitHubUpstreamErrorKind::NotFound),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                GitHubUpstreamErrorKind::InvalidRequest,
+            ),
             (StatusCode::FORBIDDEN, GitHubUpstreamErrorKind::Forbidden),
             (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1439,7 +1551,8 @@ mod tests {
             ),
             (StatusCode::BAD_GATEWAY, GitHubUpstreamErrorKind::Upstream),
         ] {
-            let GitHubServiceError::Upstream(error) = map_http_error(status, &headers) else {
+            let GitHubServiceError::Upstream(error) = map_http_error(status, &headers, b"{}")
+            else {
                 panic!("HTTP failures should remain upstream errors");
             };
             assert_eq!(error.kind, expected);
@@ -1452,11 +1565,44 @@ mod tests {
             "0".parse().expect("header value should parse"),
         );
         let GitHubServiceError::Upstream(error) =
-            map_http_error(StatusCode::FORBIDDEN, &rate_limit_headers)
+            map_http_error(StatusCode::FORBIDDEN, &rate_limit_headers, b"{}")
         else {
             panic!("HTTP failures should remain upstream errors");
         };
         assert_eq!(error.kind, GitHubUpstreamErrorKind::RateLimited);
+        assert_eq!(error.retry_after, None);
+
+        let GitHubServiceError::Upstream(error) = map_http_error(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            br#"{"message":"You have exceeded a secondary rate limit."}"#,
+        ) else {
+            panic!("secondary rate limit should remain an upstream error");
+        };
+        assert_eq!(error.kind, GitHubUpstreamErrorKind::RateLimited);
+        assert_eq!(error.retry_after.as_deref(), Some("60"));
+
+        let mut retry_after_headers = HeaderMap::new();
+        retry_after_headers.insert(header::RETRY_AFTER, HeaderValue::from_static("120"));
+        let GitHubServiceError::Upstream(error) =
+            map_http_error(StatusCode::TOO_MANY_REQUESTS, &retry_after_headers, b"{}")
+        else {
+            panic!("rate limit should remain an upstream error");
+        };
+        assert_eq!(error.retry_after.as_deref(), Some("120"));
+
+        let mut reset_headers = HeaderMap::new();
+        reset_headers.insert(
+            header::HeaderName::from_static("x-ratelimit-reset"),
+            HeaderValue::from_static("1700000000"),
+        );
+        let GitHubServiceError::Upstream(error) =
+            map_http_error(StatusCode::TOO_MANY_REQUESTS, &reset_headers, b"{}")
+        else {
+            panic!("rate limit should remain an upstream error");
+        };
+        assert_eq!(error.retry_after, None);
+        assert_eq!(error.rate_limit_reset.as_deref(), Some("1700000000"));
     }
 
     #[tokio::test]

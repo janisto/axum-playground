@@ -40,6 +40,7 @@ pub struct Item {
     #[serde(rename = "inStock")]
     pub in_stock: bool,
     #[serde(rename = "createdAt")]
+    #[schema(format = DateTime)]
     pub created_at: String,
     pub description: String,
 }

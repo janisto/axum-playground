@@ -657,6 +657,22 @@ async fn github_error_mapping_covers_not_found_forbidden_rate_limit_and_upstream
     .expect("request should succeed");
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
 
+    let invalid_request = build_app(test_state_with_github_service(GitHubService::mock(
+        MockGitHubService::demo().with_error(GitHubServiceError::Upstream(
+            GitHubUpstreamError::new(GitHubUpstreamErrorKind::InvalidRequest, 422, None, None),
+        )),
+    )))
+    .oneshot(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/v1/github/owners/octocat")
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await
+    .expect("request should succeed");
+    assert_eq!(invalid_request.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
     let rate_limited = build_app(test_state_with_github_service(GitHubService::mock(
         MockGitHubService::demo().with_error(GitHubServiceError::Upstream(
             GitHubUpstreamError::new(
@@ -733,6 +749,20 @@ async fn openapi_includes_github_paths() {
             .is_some()
     );
     for path in [
+        "/v1/github/owners/{owner}",
+        "/v1/github/owners/{owner}/repos",
+        "/v1/github/repos/{owner}/{repo}",
+        "/v1/github/repos/{owner}/{repo}/activity",
+        "/v1/github/repos/{owner}/{repo}/languages",
+        "/v1/github/repos/{owner}/{repo}/tags",
+    ] {
+        let operation = &document["paths"][path]["get"];
+        assert_eq!(
+            operation["responses"]["422"]["$ref"],
+            "#/components/responses/ProblemResponse"
+        );
+    }
+    for path in [
         "/v1/github/owners/{owner}/repos",
         "/v1/github/repos/{owner}/{repo}/tags",
     ] {
@@ -749,10 +779,6 @@ async fn openapi_includes_github_paths() {
             operation["responses"]["200"]["headers"]["Link"]["schema"]["type"],
             "string"
         );
-        assert_eq!(
-            operation["responses"]["422"]["$ref"],
-            "#/components/responses/ProblemResponse"
-        );
     }
     assert_eq!(
         document["components"]["schemas"]["Activity"]["properties"]["actor"]["type"],
@@ -761,6 +787,14 @@ async fn openapi_includes_github_paths() {
     assert_eq!(
         document["components"]["schemas"]["Activity"]["properties"]["actorAvatarUrl"]["type"],
         serde_json::json!(["string", "null"])
+    );
+    assert_eq!(
+        document["components"]["schemas"]["Activity"]["properties"]["timestamp"]["format"],
+        "date-time"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["Owner"]["properties"]["createdAt"]["format"],
+        "date-time"
     );
     assert!(
         document["components"]["responses"]["ProblemResponse"]["content"]

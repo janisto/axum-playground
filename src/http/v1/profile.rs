@@ -90,10 +90,10 @@ pub enum UnauthorizedProblemResponse {
 
 #[derive(Debug, ToResponse)]
 #[response(
-    description = "Authentication dependency temporarily unavailable",
+    description = "Authentication or persistence dependency temporarily unavailable",
     headers(("Retry-After" = String, description = "May indicate when certificate retrieval can be retried"))
 )]
-pub enum AuthenticationUnavailableProblemResponse {
+pub enum DependencyUnavailableProblemResponse {
     Json(#[content("application/problem+json")] ProblemDetails),
     Cbor(#[content("application/cbor")] ProblemDetails),
 }
@@ -127,7 +127,7 @@ pub fn router() -> Router<Arc<AppState>> {
         (status = 415, response = ProblemResponse),
         (status = 422, response = ProblemResponse),
         (status = 500, response = ProblemResponse),
-        (status = 503, response = AuthenticationUnavailableProblemResponse)
+        (status = 503, response = DependencyUnavailableProblemResponse)
     )
 )]
 pub async fn create_profile_handler(
@@ -172,7 +172,7 @@ pub async fn create_profile_handler(
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
         (status = 500, response = ProblemResponse),
-        (status = 503, response = AuthenticationUnavailableProblemResponse)
+        (status = 503, response = DependencyUnavailableProblemResponse)
     )
 )]
 pub async fn get_profile_handler(
@@ -206,7 +206,7 @@ pub async fn get_profile_handler(
         (status = 415, response = ProblemResponse),
         (status = 422, response = ProblemResponse),
         (status = 500, response = ProblemResponse),
-        (status = 503, response = AuthenticationUnavailableProblemResponse)
+        (status = 503, response = DependencyUnavailableProblemResponse)
     )
 )]
 pub async fn update_profile_handler(
@@ -245,7 +245,7 @@ pub async fn update_profile_handler(
         (status = 401, response = UnauthorizedProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 500, response = ProblemResponse),
-        (status = 503, response = AuthenticationUnavailableProblemResponse)
+        (status = 503, response = DependencyUnavailableProblemResponse)
     )
 )]
 pub async fn delete_profile_handler(
@@ -331,6 +331,18 @@ fn map_service_error(headers: &HeaderMap, error: ProfileServiceError) -> Respons
         }
         ProfileServiceError::AlreadyExists => {
             problem_response(StatusCode::CONFLICT, "profile already exists", headers)
+        }
+        ProfileServiceError::Unavailable(error) => {
+            tracing::warn!(
+                operation = %error.operation(),
+                reason = "unavailable",
+                "profile operation failed"
+            );
+            problem_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "profile service unavailable",
+                headers,
+            )
         }
         ProfileServiceError::Backend(error) => {
             tracing::warn!(

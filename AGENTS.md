@@ -29,6 +29,12 @@ Instructions for coding agents working in this repository.
 - Mark breaking changes with `!` and explain them in a `BREAKING CHANGE:` footer.
 - Before committing, run `just qa` and `git diff --check`.
 
+## GitHub automation
+
+- Reference GitHub Actions by explicit full release tags such as
+  `owner/action@v1.2.3`, not full commit SHAs or floating major-version tags.
+  Dependabot updates those release tags.
+
 ## Mandatory skills
 
 - Use `.agents/skills/adversarial-testing/SKILL.md` for every task that plans, creates, modifies, reviews, debugs, or evaluates tests. Apply it alongside any more specific framework or infrastructure testing skill.
@@ -36,7 +42,7 @@ Instructions for coding agents working in this repository.
 
 ## Repository and toolchain
 
-- Rust 1.97.0, edition 2024, Axum 0.8, and Tokio are the current baseline. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
+- Rust 1.97.1, edition 2024, Axum 0.8, and Tokio are the current baseline. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
 - Prefer current official Rust, Axum, Tokio, Tower, and crate documentation over older examples, especially pre-Axum-0.8 or pre-edition-2024 patterns.
 - Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
@@ -63,7 +69,7 @@ Instructions for coding agents working in this repository.
 - Keep public JSON fields camelCase, using Serde renames when Rust naming differs. Keep Firestore storage naming separate from the HTTP contract.
 - Document every public handler with `#[utoipa::path(...)]`. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
 - Preserve JSON as the default success representation and explicit `application/cbor` as the negotiated alternative on versioned endpoints. JSON wins ties and wildcards; exact exclusions and RFC 9110 specificity remain authoritative. Unsupported modeled success representations return 406 before endpoint work. `/health` remains JSON-only, and bodyless 204 responses ignore `Accept`.
-- Accept request bodies only as owned `application/json` or exact `application/cbor`; do not claim arbitrary `+cbor` media types. Return Problem Details with 415 for unsupported media types, 400 for malformed JSON/CBOR, and 413 for the shared 1 MiB limit. A CBOR request must contain exactly one data item.
+- Accept request bodies only with exactly one `Content-Type` value of owned `application/json` or exact `application/cbor`; do not claim arbitrary `+cbor` media types. Accept `Content-Encoding` only when absent or a single `identity` value. Return Problem Details with 415 for unsupported or ambiguous media metadata, 400 for malformed JSON/CBOR, and 413 for the shared 1 MiB limit. A CBOR request must contain exactly one data item.
 - Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.
 - Preserve `Vary: Origin, Accept` on application-owned responses and include contract headers such as `Location` and `Link` through shared helpers.
 - Respect a valid incoming `X-Request-Id`, generate a UUIDv4 fallback when it is absent or invalid, and keep request correlation behavior centralized in middleware.
@@ -79,10 +85,10 @@ Instructions for coding agents working in this repository.
 ## Authentication, persistence, security, and logging
 
 - Protected profile routes use the verified `AuthenticatedUser` extractor. Do not parse authorization headers in handlers or accept a client-selected profile owner.
-- Preserve production Firebase verification: RS256 Google keys, issuer and audience checks, Identity Platform lookup, and disabled or revoked-user handling. Missing or malformed revocation metadata is an authentication dependency failure, never evidence that a token is valid. Preserve the explicit emulator path when `FIREBASE_AUTH_EMULATOR_HOST` is configured.
+- Preserve production Firebase verification: RS256 Google keys, issuer and audience checks, Identity Platform lookup, and disabled or revoked-user handling. This application is not tenant-aware, so reject tokens carrying `firebase.tenant` rather than looking the UID up in the root project. Missing or malformed revocation metadata is an authentication dependency failure, never evidence that a token is valid. Preserve the explicit emulator path when `FIREBASE_AUTH_EMULATOR_HOST` is configured.
 - Use mock services for deterministic tests and the Firestore-backed profile service only when persistence semantics are under test. Preserve create-if-absent, ownership, audit, and timestamp behavior in the service layer. Derive Firestore profile document IDs with the shared prefixed Base64URL helper; Firebase UIDs are opaque and may contain Firestore path delimiters.
 - Keep runtime configuration in environment variables and `AppConfig`. Never commit or log credentials, tokens, service-account paths, authorization values, profile data, or other PII. Prefer Application Default Credentials and workload identity in deployed environments.
-- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments.
+- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments. When `K_SERVICE` identifies Cloud Run, require `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - Keep request logs and trace correlation in `axum-observability`. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 

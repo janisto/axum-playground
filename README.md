@@ -2,7 +2,7 @@
 
 [![Build and tests](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-ci.yml?branch=main&label=build%20%26%20tests&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-ci.yml)
 [![Code quality](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-lint.yml?branch=main&label=code%20quality&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-lint.yml)
-[![Rust 1.97.0](https://img.shields.io/badge/Rust-1.97.0-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![MIT license](https://img.shields.io/github/license/janisto/axum-playground)](LICENSE)
 
 A public REST API example built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just). It is intentionally not deployed yet; the repository is the example and validation target.
@@ -23,7 +23,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
 - Cursor-based pagination with RFC 8288 `Link` headers on items, GitHub repositories, activity, and tags
 - OpenAPI 3.1 documentation at `/v1/openapi`, including JSON/CBOR request and response media types plus bearer auth, with Swagger UI at `/api-docs`
-- A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedBy` links
+- A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedby` links
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
 - Firestore-backed profile persistence with safe opaque-UID document keys, normalization, and audit logging
 - Health check endpoint at `/health`
@@ -64,15 +64,16 @@ Errors use the RFC 9457 Problem Details data model and honor content negotiation
 | 409 Conflict | Profile already exists |
 | 413 Content Too Large | Request body exceeds the 1 MiB limit |
 | 415 Unsupported Media Type | Request body is not owned JSON or CBOR |
-| 422 Unprocessable Entity | Validation failures on well-formed input |
+| 422 Unprocessable Entity | Validation failures on well-formed input or invalid upstream cursor parameters |
 | 502 Bad Gateway | Upstream dependency failure |
+| 503 Service Unavailable | Request timeout or temporary authentication or persistence failure |
 
 #### Content Negotiation
 
 - JSON is the default and wins equal-quality ties.
 - CBOR is selected only by an explicit positive-quality `application/cbor` media range; wildcards do not silently opt clients into binary responses.
 - Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
-- Request bodies must declare `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, and a CBOR body must contain exactly one data item.
+- Request bodies must declare exactly one `Content-Type` value of `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, a CBOR body must contain exactly one data item, and `Content-Encoding` is limited to absent or a single `identity` value.
 - Problems use `application/problem+json` by default and `application/cbor` when CBOR is explicitly preferred. Error negotiation is best effort so an existing error is not replaced by a second 406.
 - Bodyless 204 responses ignore `Accept`.
 - `/health` remains JSON-only
@@ -115,6 +116,7 @@ Notes:
 
 - Emulator hosts must omit the protocol prefix and use loopback, for example `127.0.0.1:9099` and `127.0.0.1:8080`. Emulator configuration is rejected outside `development` and `test`.
 - Unknown `APP_ENVIRONMENT` values fail startup instead of silently selecting development behavior.
+- When `K_SERVICE` indicates Cloud Run, startup requires `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
 - Runtime state always constructs real HTTP, authentication, and persistence services. Tests compose explicit doubles; setting `APP_ENVIRONMENT=test` does not activate mock services.
@@ -125,9 +127,9 @@ Notes:
 
 ### Requirements
 
-- Rust 1.97.0 via `rust-toolchain.toml`
-- [Just](https://github.com/casey/just) 1.56.0
-- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.27.0 for local workflow checks
+- Rust 1.97.1 via `rust-toolchain.toml`
+- [Just](https://github.com/casey/just) 1.57.0
+- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.28.0 for local workflow checks
 - [Firebase CLI](https://firebase.google.com/docs/cli) and Java 21 when running emulator-backed tests
 - Podman or Docker for local image builds
 
@@ -346,7 +348,7 @@ gcloud builds submit --config cloudbuild.yaml \
 	--substitutions _REGION=europe-west4,_AR_REPOSITORY=app-images,_IMAGE_NAME=axum-playground,_SERVICE=axum-playground,_DEPLOY=true
 ```
 
-The committed `cloudbuild.yaml` is configured to build and push both `${SHORT_SHA}` and `latest` tags. When `_DEPLOY=true`, it is intended to deploy the `${SHORT_SHA}` image to Cloud Run in the configured region.
+The committed `cloudbuild.yaml` builds and explicitly pushes both immutable `${BUILD_ID}` and `latest` tags. When `_DEPLOY=true`, it deploys the `${BUILD_ID}` image after the push and configures `APP_ENVIRONMENT=production` plus `FIREBASE_PROJECT_ID=${PROJECT_ID}`.
 
 Production runtime expectations:
 
@@ -368,7 +370,7 @@ Production runtime expectations:
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
 - Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
 - Coverage export through `just coverage-lcov` and `just coverage-html`
-- Container image buildability through `just docker-build`
+- Container image buildability through `just docker-build` and the hosted `app-ci.yml` container job
 
 ### CI/CD
 
@@ -376,7 +378,7 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Description |
 | --- | --- |
-| `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, and coverage artifact generation |
+| `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, production container build, and coverage artifact generation |
 | `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
 | `workflow-security.yml` | Hosted zizmor workflow security analysis |
 | `labeler.yml` | Automatic pull request labeling |

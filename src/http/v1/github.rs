@@ -150,6 +150,7 @@ pub fn router() -> Router<Arc<AppState>> {
         (status = 403, response = ProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
         (status = 429, response = ProblemResponse),
         (status = 502, response = ProblemResponse)
     )
@@ -242,6 +243,7 @@ pub async fn list_github_owner_repos_handler(
         (status = 403, response = ProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
         (status = 429, response = ProblemResponse),
         (status = 502, response = ProblemResponse)
     )
@@ -345,6 +347,7 @@ pub async fn list_github_repo_activity_handler(
         (status = 403, response = ProblemResponse),
         (status = 404, response = ProblemResponse),
         (status = 406, response = ProblemResponse),
+        (status = 422, response = ProblemResponse),
         (status = 429, response = ProblemResponse),
         (status = 502, response = ProblemResponse)
     )
@@ -522,6 +525,7 @@ fn map_service_error(
     if let GitHubServiceError::Upstream(upstream) = &error {
         let reason = match upstream.kind {
             GitHubUpstreamErrorKind::NotFound => "not_found",
+            GitHubUpstreamErrorKind::InvalidRequest => "invalid_request",
             GitHubUpstreamErrorKind::Forbidden => "forbidden",
             GitHubUpstreamErrorKind::RateLimited => "rate_limited",
             GitHubUpstreamErrorKind::Upstream => "upstream",
@@ -559,6 +563,11 @@ fn map_service_error(
             GitHubUpstreamErrorKind::NotFound => {
                 problem_response(StatusCode::NOT_FOUND, "resource not found", headers)
             }
+            GitHubUpstreamErrorKind::InvalidRequest => problem_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid request parameters",
+                headers,
+            ),
             GitHubUpstreamErrorKind::Forbidden => {
                 problem_response(StatusCode::FORBIDDEN, "access denied", headers)
             }
@@ -604,6 +613,7 @@ mod tests {
     fn only_uncontrolled_upstream_failures_use_dependency_failure_logging() {
         for kind in [
             GitHubUpstreamErrorKind::NotFound,
+            GitHubUpstreamErrorKind::InvalidRequest,
             GitHubUpstreamErrorKind::Forbidden,
             GitHubUpstreamErrorKind::RateLimited,
         ] {

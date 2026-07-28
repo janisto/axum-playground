@@ -23,6 +23,7 @@ pub struct ProblemDetails {
     pub r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[schema(minimum = 100, maximum = 599)]
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -88,7 +89,7 @@ impl ProblemDetails {
         ensure_vary(response.headers_mut(), ["Origin", "Accept"]);
         response.headers_mut().append(
             header::LINK,
-            HeaderValue::from_static("</schemas/ErrorModel.json>; rel=\"describedBy\""),
+            HeaderValue::from_static("</schemas/ErrorModel.json>; rel=\"describedby\""),
         );
         response
     }
@@ -168,7 +169,7 @@ mod tests {
                 .headers()
                 .get(header::LINK)
                 .and_then(|value| value.to_str().ok()),
-            Some("</schemas/ErrorModel.json>; rel=\"describedBy\"")
+            Some("</schemas/ErrorModel.json>; rel=\"describedby\"")
         );
     }
 

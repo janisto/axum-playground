@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Body,
     extract::Request,
     http::{HeaderName, Method, StatusCode, header},
     middleware::{Next, from_fn},
@@ -77,6 +78,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
         .layer(
             ServiceBuilder::new()
                 .layer(ObservabilityLayer::new(observability_config()))
+                .layer(from_fn(empty_head_response_body))
                 .layer(from_fn(security_headers_middleware))
                 .layer(cors_layer)
                 .layer(from_fn(panic_recovery_middleware))
@@ -85,6 +87,17 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
                 .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE_BYTES)),
         )
         .with_state(state)
+}
+
+async fn empty_head_response_body(request: Request, next: Next) -> Response {
+    let is_head = request.method() == Method::HEAD;
+    let response = next.run(request).await;
+    if !is_head {
+        return response;
+    }
+
+    let (parts, _) = response.into_parts();
+    Response::from_parts(parts, Body::empty())
 }
 
 async fn payload_too_large_problem_middleware(request: Request, next: Next) -> Response {

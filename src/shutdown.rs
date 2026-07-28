@@ -11,13 +11,25 @@ enum ShutdownCause {
 
 pub async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for Ctrl-C shutdown signal");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut stream) = signal(SignalKind::terminate()) {
-            let _ = stream.recv().await;
+        match signal(SignalKind::terminate()) {
+            Ok(mut stream) => {
+                if stream.recv().await.is_none() {
+                    tracing::error!("SIGTERM shutdown signal stream closed");
+                    std::future::pending::<()>().await;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to listen for SIGTERM shutdown signal");
+                std::future::pending::<()>().await;
+            }
         }
     };
 

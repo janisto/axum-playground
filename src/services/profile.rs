@@ -57,7 +57,9 @@ pub struct Profile {
     pub phone_number: String,
     pub marketing: bool,
     pub terms: bool,
+    #[schema(format = DateTime)]
     pub created_at: String,
+    #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
@@ -86,6 +88,8 @@ pub enum ProfileServiceError {
     NotFound,
     #[error("profile already exists")]
     AlreadyExists,
+    #[error("profile service unavailable")]
+    Unavailable(ProfileBackendError),
     #[error(transparent)]
     Backend(#[from] ProfileBackendError),
 }
@@ -476,7 +480,7 @@ async fn new_firestore_db(
         FirestoreDb::with_options(options).await
     };
 
-    db.map_err(|error| ProfileBackendError::new(ProfileOperation::Initialize, error).into())
+    db.map_err(|error| map_firestore_error(error, ProfileOperation::Initialize))
 }
 
 fn firestore_db_options(project_id: &str, emulator_host: Option<&str>) -> FirestoreDbOptions {
@@ -491,6 +495,7 @@ fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
     match error {
         ProfileServiceError::NotFound => "not_found",
         ProfileServiceError::AlreadyExists => "already_exists",
+        ProfileServiceError::Unavailable(_) => "unavailable",
         ProfileServiceError::Backend(_) => "backend",
     }
 }
@@ -569,6 +574,15 @@ fn timestamp_now() -> String {
 }
 
 fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> ProfileServiceError {
+    if matches!(&error, FirestoreError::NetworkError(_))
+        || matches!(
+            &error,
+            FirestoreError::DatabaseError(database_error) if database_error.retry_possible
+        )
+    {
+        return ProfileServiceError::Unavailable(ProfileBackendError::new(operation, error));
+    }
+
     match (operation, error) {
         (ProfileOperation::Create, FirestoreError::DataConflictError(_)) => {
             ProfileServiceError::AlreadyExists
@@ -585,8 +599,8 @@ fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> Pr
 #[cfg(test)]
 mod tests {
     use firestore::errors::{
-        FirestoreDataConflictError, FirestoreDataNotFoundError, FirestoreError,
-        FirestoreErrorPublicGenericDetails,
+        FirestoreDataConflictError, FirestoreDataNotFoundError, FirestoreDatabaseError,
+        FirestoreError, FirestoreErrorPublicGenericDetails, FirestoreNetworkError,
     };
     use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -783,6 +797,13 @@ mod tests {
             ))),
             "backend"
         );
+        assert_eq!(
+            profile_error_kind(&ProfileServiceError::Unavailable(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("temporary failure"),
+            ),)),
+            "unavailable"
+        );
     }
 
     #[test]
@@ -837,6 +858,42 @@ mod tests {
         assert!(matches!(
             map_firestore_error(missing, ProfileOperation::Create),
             ProfileServiceError::NotFound
+        ));
+    }
+
+    #[test]
+    fn transient_firestore_failures_map_to_service_unavailable() {
+        let public = || FirestoreErrorPublicGenericDetails::new("UNAVAILABLE".to_owned());
+        let network = FirestoreError::NetworkError(FirestoreNetworkError::new(
+            public(),
+            "connection failed".to_owned(),
+        ));
+        assert!(matches!(
+            map_firestore_error(network, ProfileOperation::Get),
+            ProfileServiceError::Unavailable(error)
+                if error.operation() == ProfileOperation::Get
+        ));
+
+        let retryable = FirestoreError::DatabaseError(FirestoreDatabaseError::new(
+            public(),
+            "retryable database failure".to_owned(),
+            true,
+        ));
+        assert!(matches!(
+            map_firestore_error(retryable, ProfileOperation::Update),
+            ProfileServiceError::Unavailable(error)
+                if error.operation() == ProfileOperation::Update
+        ));
+
+        let permanent = FirestoreError::DatabaseError(FirestoreDatabaseError::new(
+            public(),
+            "permanent database failure".to_owned(),
+            false,
+        ));
+        assert!(matches!(
+            map_firestore_error(permanent, ProfileOperation::Delete),
+            ProfileServiceError::Backend(error)
+                if error.operation() == ProfileOperation::Delete
         ));
     }
 
