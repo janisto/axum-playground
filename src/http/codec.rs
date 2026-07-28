@@ -159,6 +159,7 @@ pub fn decode_request_body<T>(
 where
     T: DeserializeOwned,
 {
+    validate_request_content_encoding(request_headers)?;
     let format = request_body_format(request_headers)?;
 
     if body.is_empty() {
@@ -182,8 +183,10 @@ where
 }
 
 fn request_body_format(headers: &HeaderMap) -> Result<Representation, RequestBodyDecodeError> {
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
+    let mut content_types = headers.get_all(header::CONTENT_TYPE).iter();
+    let content_type = content_types
+        .next()
+        .filter(|_| content_types.next().is_none())
         .and_then(|value| value.to_str().ok())
         .ok_or(RequestBodyDecodeError::UnsupportedMediaType)?;
     let mut parts = content_type.split(';');
@@ -200,6 +203,21 @@ fn request_body_format(headers: &HeaderMap) -> Result<Representation, RequestBod
         CBOR_MEDIA_TYPE if parameters.is_empty() => Ok(Representation::Cbor),
         _ => Err(RequestBodyDecodeError::UnsupportedMediaType),
     }
+}
+
+fn validate_request_content_encoding(headers: &HeaderMap) -> Result<(), RequestBodyDecodeError> {
+    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
+    let Some(encoding) = encodings.next() else {
+        return Ok(());
+    };
+    if encodings.next().is_some()
+        || !encoding
+            .to_str()
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("identity"))
+    {
+        return Err(RequestBodyDecodeError::UnsupportedMediaType);
+    }
+    Ok(())
 }
 
 fn valid_json_content_type_parameters(parameters: &[&str]) -> bool {
@@ -306,6 +324,46 @@ mod tests {
                 Bytes::from_static(br#"{\"message\":\"json\"}"#),
             ),
             Err(RequestBodyDecodeError::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn decode_request_body_rejects_ambiguous_content_metadata() {
+        let body = Bytes::from_static(br#"{"message":"json"}"#);
+        let mut headers = HeaderMap::new();
+        headers.append(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.append(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/cbor"),
+        );
+        assert_eq!(
+            decode_request_body::<Payload>(&headers, body.clone()),
+            Err(RequestBodyDecodeError::UnsupportedMediaType)
+        );
+
+        headers.clear();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert_eq!(
+            decode_request_body::<Payload>(&headers, body.clone()),
+            Err(RequestBodyDecodeError::UnsupportedMediaType)
+        );
+
+        headers.insert(
+            header::CONTENT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        assert_eq!(
+            decode_request_body::<Payload>(&headers, body),
+            Ok(Payload {
+                message: "json".to_owned()
+            })
         );
     }
 

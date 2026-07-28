@@ -7,7 +7,6 @@ This folder is not part of the Rust Axum application.
 
 Supported function languages are:
 
-- Go
 - Python
 - JavaScript/TypeScript
 

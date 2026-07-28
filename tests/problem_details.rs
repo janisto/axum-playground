@@ -25,7 +25,7 @@ async fn problem_details_default_to_json_and_include_relative_schema_link() {
     assert_eq!(
         response.headers().get(header::LINK),
         Some(&HeaderValue::from_static(
-            "</schemas/ErrorModel.json>; rel=\"describedBy\""
+            "</schemas/ErrorModel.json>; rel=\"describedby\""
         ))
     );
 
@@ -85,4 +85,18 @@ async fn advertised_error_schema_link_resolves_to_json_schema() {
         "https://json-schema.org/draft/2020-12/schema"
     );
     assert_eq!(schema["required"], serde_json::json!(["status"]));
+
+    let openapi = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/openapi")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let document: serde_json::Value = read_json_body(openapi).await;
+    let status = &document["components"]["schemas"]["ProblemDetails"]["properties"]["status"];
+    assert_eq!(status["minimum"], 100);
+    assert_eq!(status["maximum"], 599);
 }

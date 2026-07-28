@@ -6,8 +6,12 @@ pub enum StartupError {
     InvalidPort(String),
     #[error("invalid APP_ENVIRONMENT value: {0}; expected development, test, or production")]
     InvalidEnvironment(String),
-    #[error("failed to initialize authentication: {0}")]
-    AuthInitialization(String),
+    #[error("Cloud Run requires APP_ENVIRONMENT=production")]
+    InvalidCloudRunEnvironment,
+    #[error("Cloud Run requires an explicit {0} value")]
+    MissingCloudRunVariable(&'static str),
+    #[error("failed to initialize authentication")]
+    AuthInitialization,
     #[error("unsafe emulator configuration for {variable}: {host}")]
     UnsafeEmulatorHost {
         variable: &'static str,

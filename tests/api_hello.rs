@@ -256,6 +256,40 @@ async fn post_hello_rejects_missing_or_unowned_content_types() {
 }
 
 #[tokio::test]
+async fn post_hello_rejects_ambiguous_or_encoded_content_metadata() {
+    let duplicate_content_type = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/hello")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_TYPE, "application/cbor")
+                .body(Body::from(r#"{"name":"Test"}"#))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(
+        duplicate_content_type.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+
+    let encoded = build_app(test_state())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/hello")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_ENCODING, "gzip")
+                .body(Body::from(r#"{"name":"Test"}"#))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(encoded.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
 async fn post_hello_validates_media_type_before_empty_body_syntax() {
     for (content_type, expected_status, expected_detail) in [
         (

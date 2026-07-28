@@ -408,6 +408,30 @@ async fn profile_backend_errors_return_500() {
 }
 
 #[tokio::test]
+async fn profile_transient_backend_errors_return_503() {
+    let state = test_state_with_auth_and_profile(
+        axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
+        ProfileService::mock(MockProfileService::default().with_error(
+            ProfileServiceError::Unavailable(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("temporary database error"),
+            )),
+        )),
+    );
+
+    let response = build_app(state)
+        .oneshot(authorized_request(
+            Method::GET,
+            "/v1/profile",
+            Body::empty(),
+        ))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn openapi_includes_profile_path() {
     let response = build_app(test_state())
         .oneshot(
@@ -468,6 +492,10 @@ async fn openapi_includes_profile_path() {
         update_schema["properties"]["firstname"]["pattern"],
         r".*\S.*"
     );
+    assert_eq!(
+        document["components"]["schemas"]["Profile"]["properties"]["createdAt"]["format"],
+        "date-time"
+    );
 
     for method in ["get", "post", "patch", "delete"] {
         let responses = &document["paths"]["/v1/profile"][method]["responses"];
@@ -477,7 +505,7 @@ async fn openapi_includes_profile_path() {
         );
         assert_eq!(
             responses["503"]["$ref"],
-            "#/components/responses/AuthenticationUnavailableProblemResponse"
+            "#/components/responses/DependencyUnavailableProblemResponse"
         );
     }
     assert_eq!(
@@ -486,8 +514,8 @@ async fn openapi_includes_profile_path() {
         "string"
     );
     assert_eq!(
-        document["components"]["responses"]["AuthenticationUnavailableProblemResponse"]["headers"]
-            ["Retry-After"]["schema"]["type"],
+        document["components"]["responses"]["DependencyUnavailableProblemResponse"]["headers"]["Retry-After"]
+            ["schema"]["type"],
         "string"
     );
 }

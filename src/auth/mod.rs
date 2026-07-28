@@ -31,7 +31,7 @@ const IDENTITY_TOOLKIT_SCOPE: &str = "https://www.googleapis.com/auth/identityto
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
 const JWKS_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
-const MAX_UNKNOWN_KEY_RETRIES: usize = 256;
+const MAX_KEY_ID_BYTES: usize = 128;
 const JWT_LEEWAY_SECS: u64 = 60;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -140,7 +140,7 @@ struct CachedJwks {
 struct JwksState {
     cached: Option<CachedJwks>,
     fetch_retry: Option<(Instant, AuthError)>,
-    unknown_key_retries: HashMap<String, Instant>,
+    unknown_key_retry_after: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +164,12 @@ struct FirebaseClaims {
     auth_time: Option<u64>,
     iss: Option<String>,
     aud: Option<String>,
+    firebase: Option<FirebaseClaimMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct FirebaseClaimMetadata {
+    tenant: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -221,12 +227,12 @@ impl AuthVerifier {
         let credentials = CredentialsBuilder::default()
             .with_scopes([IDENTITY_TOOLKIT_SCOPE])
             .build_access_token_credentials()
-            .map_err(|error| StartupError::AuthInitialization(error.to_string()))?;
+            .map_err(|_| StartupError::AuthInitialization)?;
 
         let client = Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .build()
-            .map_err(|error| StartupError::AuthInitialization(error.to_string()))?;
+            .map_err(|_| StartupError::AuthInitialization)?;
 
         Ok(Self {
             inner: Arc::new(AuthVerifierInner::Production(Box::new(
@@ -360,9 +366,9 @@ impl GoogleJwksClient {
         state.cached = Some(CachedJwks::new(keys, now, ttl));
         state.fetch_retry = None;
         if key.is_some() {
-            state.unknown_key_retries.remove(kid);
+            state.unknown_key_retry_after = None;
         } else {
-            state.remember_unknown_key(kid, now);
+            state.unknown_key_retry_after = Some(now + JWKS_RETRY_COOLDOWN);
         }
 
         key.ok_or(AuthError::InvalidToken)
@@ -458,27 +464,17 @@ impl JwksState {
         {
             return Some(result);
         }
-        self.unknown_key_retries
-            .get(kid)
-            .filter(|retry_after| now < **retry_after)
-            .map(|_| Err(AuthError::InvalidToken))
-    }
-
-    fn remember_unknown_key(&mut self, kid: &str, now: Instant) {
-        self.unknown_key_retries
-            .retain(|_, retry_after| now < *retry_after);
-        if self.unknown_key_retries.len() >= MAX_UNKNOWN_KEY_RETRIES
-            && !self.unknown_key_retries.contains_key(kid)
-            && let Some(oldest_kid) = self
-                .unknown_key_retries
-                .iter()
-                .min_by_key(|(_, retry_after)| **retry_after)
-                .map(|(kid, _)| kid.clone())
+        if self
+            .cached
+            .as_ref()
+            .is_some_and(|cache| cache.is_fresh(now))
+            && self
+                .unknown_key_retry_after
+                .is_some_and(|retry_after| now < retry_after)
         {
-            self.unknown_key_retries.remove(&oldest_kid);
+            return Some(Err(AuthError::InvalidToken));
         }
-        self.unknown_key_retries
-            .insert(kid.to_owned(), now + JWKS_RETRY_COOLDOWN);
+        None
     }
 }
 
@@ -639,6 +635,13 @@ fn validate_common_claims_at(
     if claims.sub.trim().is_empty() {
         return Err(AuthError::InvalidToken);
     }
+    if claims
+        .firebase
+        .as_ref()
+        .is_some_and(|firebase| firebase.tenant.is_some())
+    {
+        return Err(AuthError::InvalidToken);
+    }
 
     let Some(issued_at) = claims.iat else {
         return Err(AuthError::InvalidToken);
@@ -679,7 +682,11 @@ fn rsa_key_id(header: &Header) -> Result<&str, AuthError> {
         return Err(AuthError::InvalidToken);
     }
 
-    header.kid.as_deref().ok_or(AuthError::InvalidToken)
+    header
+        .kid
+        .as_deref()
+        .filter(|kid| !kid.is_empty() && kid.len() <= MAX_KEY_ID_BYTES)
+        .ok_or(AuthError::InvalidToken)
 }
 
 fn firebase_validation(project_id: &str) -> Validation {
@@ -822,9 +829,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaims, FirebaseUser,
-        GoogleJwk, GoogleJwksClient, GoogleJwksResponse, IdentityLookupResponse,
-        IdentityLookupUser, JWT_LEEWAY_SECS, JwksState, MAX_UNKNOWN_KEY_RETRIES,
+        AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaimMetadata,
+        FirebaseClaims, FirebaseUser, GoogleJwk, GoogleJwksClient, GoogleJwksResponse,
+        IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, JwksState,
         MockGoogleJwksTransport, auth_error_is_dependency_failure, cache_ttl,
         categorize_auth_error, expected_issuer, extract_bearer_token, firebase_validation,
         map_jwt_error, require_successful_response, rsa_key_id, token_is_revoked,
@@ -935,6 +942,12 @@ mod tests {
             Err(AuthError::InvalidToken)
         );
 
+        for invalid_key_id in [String::new(), "x".repeat(super::MAX_KEY_ID_BYTES + 1)] {
+            let mut header = Header::new(Algorithm::RS256);
+            header.kid = Some(invalid_key_id);
+            assert_eq!(rsa_key_id(&header), Err(AuthError::InvalidToken));
+        }
+
         let mut wrong_algorithm = Header::new(Algorithm::HS256);
         wrong_algorithm.kid = Some("google-key".to_owned());
         assert_eq!(rsa_key_id(&wrong_algorithm), Err(AuthError::InvalidToken));
@@ -1023,6 +1036,15 @@ mod tests {
             validate_common_claims_at(&claims, "demo-test-project", now),
             Err(AuthError::InvalidToken)
         );
+
+        claims = valid_claims(now);
+        claims.firebase = Some(FirebaseClaimMetadata {
+            tenant: Some("tenant-a".to_owned()),
+        });
+        assert_eq!(
+            validate_common_claims_at(&claims, "demo-test-project", now),
+            Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]
@@ -1063,7 +1085,7 @@ mod tests {
         let state = JwksState {
             cached: None,
             fetch_retry: Some((deadline, AuthError::CertificateFetch)),
-            unknown_key_retries: HashMap::from([("missing-key".to_owned(), deadline)]),
+            unknown_key_retry_after: Some(deadline),
         };
 
         assert_eq!(
@@ -1073,9 +1095,13 @@ mod tests {
         assert_eq!(state.key_or_retry("key", deadline), None);
 
         let state = JwksState {
-            cached: None,
+            cached: Some(CachedJwks::new(
+                HashMap::new(),
+                deadline - Duration::from_secs(1),
+                Duration::from_secs(2),
+            )),
             fetch_retry: None,
-            unknown_key_retries: HashMap::from([("missing-key".to_owned(), deadline)]),
+            unknown_key_retry_after: Some(deadline),
         };
         assert_eq!(
             state.key_or_retry("missing-key", deadline - Duration::from_nanos(1)),
@@ -1083,21 +1109,6 @@ mod tests {
         );
         assert_eq!(state.key_or_retry("different-key", deadline), None);
         assert_eq!(state.key_or_retry("missing-key", deadline), None);
-    }
-
-    #[test]
-    fn unknown_key_retry_cache_is_bounded_and_prunes_expired_entries() {
-        let now = Instant::now();
-        let mut state = JwksState::default();
-        for index in 0..=MAX_UNKNOWN_KEY_RETRIES {
-            state.remember_unknown_key(&format!("key-{index}"), now);
-        }
-        assert_eq!(state.unknown_key_retries.len(), MAX_UNKNOWN_KEY_RETRIES);
-        assert!(state.unknown_key_retries.contains_key("key-256"));
-
-        state.remember_unknown_key("fresh-key", now + super::JWKS_RETRY_COOLDOWN);
-        assert_eq!(state.unknown_key_retries.len(), 1);
-        assert!(state.unknown_key_retries.contains_key("fresh-key"));
     }
 
     #[tokio::test]
@@ -1142,11 +1153,11 @@ mod tests {
                 .iter()
                 .all(|result| *result == Err(AuthError::InvalidToken))
         );
-        assert_eq!(transport.fetch_count(), 3);
+        assert_eq!(transport.fetch_count(), 2);
     }
 
     #[tokio::test]
-    async fn unknown_key_cooldown_does_not_block_a_different_rotated_key() {
+    async fn unknown_key_cooldown_blocks_key_id_floods_until_the_deadline() {
         let old_keys = json!([{"kid": "old-key", "n": "old-modulus", "e": "AQAB"}]);
         let rotated_keys = json!([
             {"kid": "old-key", "n": "old-modulus", "e": "AQAB"},
@@ -1172,13 +1183,12 @@ mod tests {
             Err(AuthError::InvalidToken)
         );
         assert_eq!(
-            client
-                .key_for("new-key")
-                .await
-                .expect("rotated key should refresh")
-                .n,
-            "new-modulus"
+            client.key_for("new-key").await,
+            Err(AuthError::InvalidToken)
         );
+
+        client.state.write().await.unknown_key_retry_after = Some(Instant::now());
+
         assert!(client.key_for("new-key").await.is_ok());
         assert_eq!(transport.fetch_count(), 3);
     }
@@ -1348,6 +1358,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emulator_verifier_rejects_tenant_tokens_when_tenancy_is_not_supported() {
+        let verifier = EmulatorAuthVerifier {
+            project_id: "demo-test-project".to_owned(),
+        };
+        let now = super::unix_timestamp_now();
+        let token = unsigned_token(
+            json!({"alg": "RS256", "typ": "JWT"}),
+            json!({
+                "sub": "tenant-user",
+                "aud": "demo-test-project",
+                "iss": expected_issuer("demo-test-project"),
+                "iat": now,
+                "auth_time": now,
+                "exp": now + 3600,
+                "firebase": {"tenant": "tenant-a"}
+            }),
+        );
+
+        assert_eq!(verifier.verify(&token).await, Err(AuthError::InvalidToken));
+    }
+
+    #[tokio::test]
     async fn emulator_verifier_rejects_expired_tokens() {
         let verifier = EmulatorAuthVerifier {
             project_id: "demo-test-project".to_owned(),
@@ -1427,6 +1459,7 @@ mod tests {
             auth_time: Some(now),
             iss: Some(expected_issuer("demo-test-project")),
             aud: Some("demo-test-project".to_owned()),
+            firebase: None,
         }
     }
 

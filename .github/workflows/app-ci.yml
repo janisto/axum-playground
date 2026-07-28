@@ -6,8 +6,7 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,15 +18,18 @@ env:
 jobs:
   tests:
     name: tests
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup toolchain install 1.97.0 --profile minimal
+        run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Cache cargo artifacts
         uses: actions/cache@v6.1.0
@@ -52,24 +54,27 @@ jobs:
 
   firebase_emulators:
     name: firebase-emulators
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup toolchain install 1.97.0 --profile minimal
+        run: rustup toolchain install 1.97.1 --profile minimal
 
       - name: Set up Java
-        uses: actions/setup-java@v5.5.0
+        uses: actions/setup-java@v5.6.0
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6.4.0
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: '24'
 
@@ -98,34 +103,56 @@ jobs:
       - name: Run required Firestore emulator tests
         run: just test-emulators-ci
 
+  container:
+    name: container
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build production container
+        run: docker build --tag axum-playground:ci .
+
   ci:
     name: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always()
     needs:
       - tests
       - firebase_emulators
+      - container
     steps:
       - name: Require successful test jobs
         env:
           FIREBASE_EMULATORS_RESULT: ${{ needs.firebase_emulators.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
           TESTS_RESULT: ${{ needs.tests.result }}
         run: |
           [[ "$TESTS_RESULT" == "success" ]]
           [[ "$FIREBASE_EMULATORS_RESULT" == "success" ]]
+          [[ "$CONTAINER_RESULT" == "success" ]]
 
   coverage:
     name: coverage
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: ci
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup toolchain install 1.97.0 --profile minimal --component llvm-tools-preview
+        run: rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
 
       - name: Cache cargo artifacts
         uses: actions/cache@v6.1.0

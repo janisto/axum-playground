@@ -103,14 +103,25 @@ impl AppConfig {
             .transpose()?
             .unwrap_or(8080);
 
+        let firebase_project_id = non_blank(value_for("FIREBASE_PROJECT_ID"));
+        let app_environment = non_blank(value_for("APP_ENVIRONMENT"))
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or_default();
+        let is_cloud_run = non_blank(value_for("K_SERVICE")).is_some();
+
+        if is_cloud_run && app_environment != AppEnvironment::Production {
+            return Err(StartupError::InvalidCloudRunEnvironment);
+        }
+        if is_cloud_run && firebase_project_id.is_none() {
+            return Err(StartupError::MissingCloudRunVariable("FIREBASE_PROJECT_ID"));
+        }
+
         Ok(Self {
             port,
-            firebase_project_id: non_blank(value_for("FIREBASE_PROJECT_ID"))
+            firebase_project_id: firebase_project_id
                 .unwrap_or_else(|| "demo-test-project".to_owned()),
-            app_environment: non_blank(value_for("APP_ENVIRONMENT"))
-                .map(|value| value.parse())
-                .transpose()?
-                .unwrap_or_default(),
+            app_environment,
             github_token: non_blank(value_for("GITHUB_TOKEN")),
             google_application_credentials: non_blank(value_for("GOOGLE_APPLICATION_CREDENTIALS")),
             firebase_auth_emulator_host: non_blank(value_for("FIREBASE_AUTH_EMULATOR_HOST")),
@@ -214,6 +225,37 @@ mod tests {
                 project_id: Some("project-id".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn cloud_run_requires_explicit_production_identity_configuration() {
+        let missing_environment = HashMap::from([
+            ("K_SERVICE", "axum-playground"),
+            ("FIREBASE_PROJECT_ID", "production-project"),
+        ]);
+        assert!(matches!(
+            AppConfig::from_values(|key| missing_environment.get(key).map(ToString::to_string)),
+            Err(StartupError::InvalidCloudRunEnvironment)
+        ));
+
+        let missing_project = HashMap::from([
+            ("K_SERVICE", "axum-playground"),
+            ("APP_ENVIRONMENT", "production"),
+        ]);
+        assert!(matches!(
+            AppConfig::from_values(|key| missing_project.get(key).map(ToString::to_string)),
+            Err(StartupError::MissingCloudRunVariable("FIREBASE_PROJECT_ID"))
+        ));
+
+        let configured = HashMap::from([
+            ("K_SERVICE", "axum-playground"),
+            ("APP_ENVIRONMENT", "production"),
+            ("FIREBASE_PROJECT_ID", "production-project"),
+        ]);
+        let config = AppConfig::from_values(|key| configured.get(key).map(ToString::to_string))
+            .expect("explicit Cloud Run identity should be accepted");
+        assert_eq!(config.app_environment, AppEnvironment::Production);
+        assert_eq!(config.firebase_project_id, "production-project");
     }
 
     #[test]

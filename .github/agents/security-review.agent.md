@@ -18,7 +18,7 @@ Before analysis, read these files:
 6. `src/middleware/recover.rs` - panic recovery middleware
 7. `src/middleware/timeout.rs` - timeout behavior
 8. `src/problem/mod.rs` - Problem Details responses
-9. `src/problem/negotiate.rs` - JSON/CBOR negotiation behavior
+9. `src/http/negotiation.rs` - JSON/CBOR negotiation behavior
 10. `src/http/codec.rs` - request/response content handling
 11. All files in `src/http/v1/` - endpoint definitions and docs wiring
 12. `src/auth/mod.rs` - authentication flow
