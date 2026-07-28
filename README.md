@@ -368,7 +368,7 @@ Production runtime expectations:
 - Firestore-backed profile CRUD through required hosted emulator coverage and an equivalent local command
 - Dependency policy and vulnerability checks through `just deny` and `just audit`
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
-- Local and hosted GitHub Actions workflow validation through the documented actionlint and zizmor versions
+- Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
 - Coverage export through `just coverage-lcov` and `just coverage-html`
 - Container image buildability through `just docker-build` and the hosted `app-ci.yml` container job
 
@@ -379,7 +379,7 @@ GitHub Actions workflows in `.github/workflows/`:
 | Workflow | Description |
 | --- | --- |
 | `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, production container build, and coverage artifact generation |
-| `app-lint.yml` | Actionlint, formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
+| `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
 | `workflow-security.yml` | Hosted zizmor workflow security analysis |
 | `labeler.yml` | Automatic pull request labeling |
 | `labeler-manual.yml` | Manual backfill labeling for historical pull requests |

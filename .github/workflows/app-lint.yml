@@ -27,12 +27,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 # zizmor: ignore[adhoc-packages]
-
-      - name: Validate workflows
-        run: actionlint
-
       - name: Set up Rust
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
 

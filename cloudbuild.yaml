@@ -45,5 +45,5 @@ steps:
             --image "${IMAGE_URI}" \
             --platform managed \
             --region "${_REGION}" \
-            --set-env-vars "APP_ENVIRONMENT=production,FIREBASE_PROJECT_ID=${PROJECT_ID}" \
+            --update-env-vars "APP_ENVIRONMENT=production,FIREBASE_PROJECT_ID=${PROJECT_ID}" \
             --quiet

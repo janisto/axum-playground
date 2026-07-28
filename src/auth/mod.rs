@@ -227,12 +227,12 @@ impl AuthVerifier {
         let credentials = CredentialsBuilder::default()
             .with_scopes([IDENTITY_TOOLKIT_SCOPE])
             .build_access_token_credentials()
-            .map_err(|_| StartupError::AuthInitialization)?;
+            .map_err(|_| StartupError::AuthCredentialsInitialization)?;
 
         let client = Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .build()
-            .map_err(|_| StartupError::AuthInitialization)?;
+            .map_err(|_| StartupError::AuthHttpClientInitialization)?;
 
         Ok(Self {
             inner: Arc::new(AuthVerifierInner::Production(Box::new(
@@ -1189,6 +1189,10 @@ mod tests {
 
         client.state.write().await.unknown_key_retry_after = Some(Instant::now());
 
+        assert_eq!(
+            client.key_for("attacker-key").await,
+            Err(AuthError::InvalidToken)
+        );
         assert!(client.key_for("new-key").await.is_ok());
         assert_eq!(transport.fetch_count(), 3);
     }

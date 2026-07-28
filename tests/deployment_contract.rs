@@ -5,7 +5,13 @@ fn cloud_build_uses_guaranteed_identity_and_pushes_before_deploying() {
     assert!(!config.contains("SHORT_SHA"));
     assert!(config.contains(":${BUILD_ID}"));
     assert!(config.contains("--build-arg VERSION=\"${BUILD_ID}\""));
-    assert!(config.contains("APP_ENVIRONMENT=production,FIREBASE_PROJECT_ID=${PROJECT_ID}"));
+    assert!(config.contains(
+        "--update-env-vars \"APP_ENVIRONMENT=production,FIREBASE_PROJECT_ID=${PROJECT_ID}\""
+    ));
+    assert!(
+        !config.contains("--set-env-vars"),
+        "deployments must preserve existing runtime configuration"
+    );
 
     let push = config
         .find("docker push \"${IMAGE_URI}\"")
