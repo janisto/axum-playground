@@ -1853,7 +1853,8 @@ fn require_http_url(value: &str) -> Result<(), GitHubServiceError> {
         .syntax_violation_callback(Some(&record_syntax_violation))
         .parse(value)
         .map_err(|_| upstream(GitHubUpstreamErrorKind::Schema))?;
-    if !has_syntax_violation.get()
+    if value.is_ascii()
+        && !has_syntax_violation.get()
         && matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
     {
@@ -2388,7 +2389,11 @@ mod tests {
     fn projection_helpers_reject_each_invalid_boundary() {
         assert!(require_nonempty("x").is_ok());
         assert_upstream(require_nonempty(""), GitHubUpstreamErrorKind::Schema);
-        for value in ["http://example.test/path", "https://example.test"] {
+        for value in [
+            "http://example.test/path",
+            "https://example.test",
+            "https://EXAMPLE.test:443/caf%C3%A9?name=value#fragment",
+        ] {
             assert!(require_http_url(value).is_ok(), "{value}");
         }
         for value in [
@@ -2404,6 +2409,8 @@ mod tests {
             "https://example.test/pa\rth",
             "https://example.test/a b",
             "https://example.test/%zz",
+            "https://example.test/café",
+            "https://例え.test/path",
         ] {
             assert_upstream(require_http_url(value), GitHubUpstreamErrorKind::Schema);
         }
@@ -2459,6 +2466,8 @@ mod tests {
             " https://example.test/path",
             "https://example.test/pa\nth",
             "https://example.test/a b",
+            "https://example.test/café",
+            "https://例え.test/path",
         ] {
             for field in ["avatar_url", "html_url"] {
                 let mut value = owner_json();
