@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
@@ -1846,8 +1847,16 @@ fn require_nonempty(value: &str) -> Result<(), GitHubServiceError> {
 }
 
 fn require_http_url(value: &str) -> Result<(), GitHubServiceError> {
-    let url = Url::parse(value).map_err(|_| upstream(GitHubUpstreamErrorKind::Schema))?;
-    if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+    let has_syntax_violation = Cell::new(false);
+    let record_syntax_violation = |_| has_syntax_violation.set(true);
+    let url = Url::options()
+        .syntax_violation_callback(Some(&record_syntax_violation))
+        .parse(value)
+        .map_err(|_| upstream(GitHubUpstreamErrorKind::Schema))?;
+    if !has_syntax_violation.get()
+        && matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+    {
         Ok(())
     } else {
         Err(upstream(GitHubUpstreamErrorKind::Schema))
@@ -2388,6 +2397,13 @@ mod tests {
             "file:///tmp/x",
             "https://",
             "not a URL",
+            " https://example.test/path",
+            "https://example.test/path ",
+            "https://exa\tmple.test/path",
+            "https://example.test/pa\nth",
+            "https://example.test/pa\rth",
+            "https://example.test/a b",
+            "https://example.test/%zz",
         ] {
             assert_upstream(require_http_url(value), GitHubUpstreamErrorKind::Schema);
         }
@@ -2434,6 +2450,47 @@ mod tests {
             let projected = project_repository(serde_json::from_value(value).expect("raw repo"))
                 .expect("repository");
             assert_eq!(projected.license.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn projection_rejects_preprocessed_url_text_in_every_public_shape() {
+        for invalid in [
+            " https://example.test/path",
+            "https://example.test/pa\nth",
+            "https://example.test/a b",
+        ] {
+            for field in ["avatar_url", "html_url"] {
+                let mut value = owner_json();
+                value[field] = json!(invalid);
+                assert_upstream(
+                    project_owner(serde_json::from_value(value).expect("raw owner")),
+                    GitHubUpstreamErrorKind::Schema,
+                );
+            }
+
+            let mut summary = repository_summary_json(1, "repo");
+            summary["html_url"] = json!(invalid);
+            assert_upstream(
+                project_repository_summary(
+                    serde_json::from_value(summary).expect("raw repository summary"),
+                ),
+                GitHubUpstreamErrorKind::Schema,
+            );
+
+            let mut repository = repository_json();
+            repository["html_url"] = json!(invalid);
+            assert_upstream(
+                project_repository(serde_json::from_value(repository).expect("raw repository")),
+                GitHubUpstreamErrorKind::Schema,
+            );
+
+            let mut activity = activity_json(1);
+            activity["actor"] = json!({"login": "octocat", "avatar_url": invalid});
+            assert_upstream(
+                project_activity(serde_json::from_value(activity).expect("raw activity")),
+                GitHubUpstreamErrorKind::Schema,
+            );
         }
     }
 
