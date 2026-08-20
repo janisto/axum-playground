@@ -439,6 +439,7 @@ enum TransactionOutcome {
     Exists,
     NotFound,
     NoChange(Profile),
+    Invalid(ProfileBackendError),
     TimestampExhausted,
     Deleted,
 }
@@ -447,6 +448,7 @@ fn create_transaction_result(outcome: TransactionOutcome) -> Result<Profile, Pro
     match outcome {
         TransactionOutcome::Profile(profile) => Ok(profile),
         TransactionOutcome::Exists => Err(ProfileServiceError::AlreadyExists),
+        TransactionOutcome::Invalid(error) => Err(error.into()),
         _ => Err(internal_profile_error(ProfileOperation::Create)),
     }
 }
@@ -455,6 +457,7 @@ fn update_transaction_result(outcome: TransactionOutcome) -> Result<Profile, Pro
     match outcome {
         TransactionOutcome::Profile(profile) | TransactionOutcome::NoChange(profile) => Ok(profile),
         TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
+        TransactionOutcome::Invalid(error) => Err(error.into()),
         _ => Err(internal_profile_error(ProfileOperation::Update)),
     }
 }
@@ -463,6 +466,7 @@ fn delete_transaction_result(outcome: &TransactionOutcome) -> Result<(), Profile
     match outcome {
         TransactionOutcome::Deleted => Ok(()),
         TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
+        TransactionOutcome::Invalid(error) => Err(error.clone().into()),
         _ => Err(internal_profile_error(ProfileOperation::Delete)),
     }
 }
@@ -549,7 +553,11 @@ impl FirestoreProfileStore {
                     let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
                     };
-                    let current = decode_stored_profile(&current)?;
+                    let current =
+                        match decode_transaction_profile(&current, ProfileOperation::Update) {
+                            Ok(current) => current,
+                            Err(error) => return Ok(TransactionOutcome::Invalid(error)),
+                        };
                     if validate_stored_profile(&current, &user_id, ProfileOperation::Update)
                         .is_err()
                     {
@@ -593,7 +601,11 @@ impl FirestoreProfileStore {
                     let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
                     };
-                    let current = decode_stored_profile(&current)?;
+                    let current =
+                        match decode_transaction_profile(&current, ProfileOperation::Delete) {
+                            Ok(current) => current,
+                            Err(error) => return Ok(TransactionOutcome::Invalid(error)),
+                        };
                     if validate_stored_profile(&current, &user_id, ProfileOperation::Delete)
                         .is_err()
                     {
@@ -672,6 +684,13 @@ fn decode_stored_profile(document: &FirestoreDocument) -> Result<Profile, Firest
         ));
     }
     FirestoreDb::deserialize_doc_to::<StoredProfile>(document).map(Profile::from)
+}
+
+fn decode_transaction_profile(
+    document: &FirestoreDocument,
+    operation: ProfileOperation,
+) -> Result<Profile, ProfileBackendError> {
+    decode_stored_profile(document).map_err(|error| ProfileBackendError::new(operation, error))
 }
 
 fn build_profile(
@@ -788,8 +807,9 @@ mod tests {
     use super::{
         CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
         ProfileServiceError, TransactionOutcome, UpdateProfileParams, create_transaction_result,
-        decode_stored_profile, delete_transaction_result, map_firestore_error, profile_document_id,
-        update_transaction_result, validate_stored_profile,
+        decode_stored_profile, decode_transaction_profile, delete_transaction_result,
+        map_firestore_error, profile_document_id, update_transaction_result,
+        validate_stored_profile,
     };
 
     fn create_params(first_name: &str) -> CreateProfileParams {
@@ -837,6 +857,10 @@ mod tests {
             noncanonical.fields.insert(field.to_owned(), extra_value);
             decode_stored_profile(&noncanonical)
                 .expect_err("noncanonical persisted fields must be rejected");
+            let error = decode_transaction_profile(&noncanonical, ProfileOperation::Update)
+                .expect_err("transaction decode must preserve a deterministic backend error");
+            assert_eq!(error.operation(), ProfileOperation::Update);
+            assert!(error.source().is_some());
         }
     }
 
@@ -1054,6 +1078,38 @@ mod tests {
                 delete_transaction_result(&outcome),
                 Err(ProfileServiceError::Backend(_))
             ));
+        }
+
+        for (operation, result) in [
+            (
+                ProfileOperation::Create,
+                create_transaction_result(TransactionOutcome::Invalid(ProfileBackendError::new(
+                    ProfileOperation::Create,
+                    std::io::Error::other("private create sentinel"),
+                )))
+                .map(|_| ()),
+            ),
+            (
+                ProfileOperation::Update,
+                update_transaction_result(TransactionOutcome::Invalid(ProfileBackendError::new(
+                    ProfileOperation::Update,
+                    std::io::Error::other("private update sentinel"),
+                )))
+                .map(|_| ()),
+            ),
+            (
+                ProfileOperation::Delete,
+                delete_transaction_result(&TransactionOutcome::Invalid(ProfileBackendError::new(
+                    ProfileOperation::Delete,
+                    std::io::Error::other("private delete sentinel"),
+                ))),
+            ),
+        ] {
+            let ProfileServiceError::Backend(error) = result.expect_err("invalid outcome") else {
+                panic!("invalid outcome must remain a deterministic backend error");
+            };
+            assert_eq!(error.operation(), operation);
+            assert!(error.source().is_some());
         }
     }
 
