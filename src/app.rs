@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Body,
     extract::Request,
     http::{HeaderValue, Method, header},
     middleware::{Next, from_fn},
@@ -45,7 +46,9 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
 
 async fn portable_head_rejection_middleware(request: Request, next: Next) -> Response {
     if request.method() == Method::HEAD && portable_allow(request.uri().path()).is_some() {
-        return method_not_allowed_handler(request).await;
+        let mut response = method_not_allowed_handler(request).await;
+        *response.body_mut() = Body::empty();
+        return response;
     }
     next.run(request).await
 }

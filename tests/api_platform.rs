@@ -392,6 +392,52 @@ async fn malformed_github_paths_are_not_classified_as_registered_head_routes() {
     }
 }
 
+#[tokio::test]
+async fn rejected_head_requests_preserve_headers_without_sending_a_body() {
+    let app = build_app(test_state());
+    for (path, allow) in [
+        ("/health", "GET"),
+        ("/v1/hello", "GET, POST"),
+        ("/v1/items", "GET"),
+        ("/v1/profile", "GET, POST, PATCH, DELETE"),
+        ("/v1/github/owners/octocat", "GET"),
+        ("/v1/github/owners/octocat/repos", "GET"),
+        ("/v1/github/repos/octocat/hello-world", "GET"),
+        ("/v1/github/repos/octocat/hello-world/activity", "GET"),
+        ("/v1/github/repos/octocat/hello-world/languages", "GET"),
+        ("/v1/github/repos/octocat/hello-world/tags", "GET"),
+        ("/openapi.json", "GET"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        assert_eq!(response.headers()[header::ALLOW], allow, "{path}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json",
+            "{path}"
+        );
+        assert_common_headers(&response, true);
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body should be readable")
+                .is_empty(),
+            "{path}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn panic_recovery_returns_a_safe_problem_and_does_not_log_the_payload() {
     let logs = Arc::new(Mutex::new(Vec::new()));

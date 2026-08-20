@@ -3,9 +3,11 @@
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use firestore::{FirestoreDb, FirestoreDocument, FirestoreWritePrecondition};
+use firestore::{
+    FirestoreDb, FirestoreDocument, FirestoreWritePrecondition, timestamp_utils::from_timestamp,
+};
 use futures_util::StreamExt;
-use gcloud_sdk::google::firestore::v1::value::ValueType;
+use gcloud_sdk::{google::firestore::v1::value::ValueType, prost_types::Timestamp};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -206,6 +208,7 @@ impl Error for ProfileMigrationError {
 #[derive(Clone, Debug)]
 struct ClassifiedRecord {
     document_id: String,
+    update_time: Option<Timestamp>,
     classification: Classification,
 }
 
@@ -219,6 +222,19 @@ enum Classification {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransactionOutcome {
     Migrated,
+    AlreadyCurrent,
+    ConcurrentChange,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MigrationTarget {
+    document_id: String,
+    update_time: Timestamp,
+}
+
+#[derive(Debug)]
+enum MigrationDecision {
+    Migrate(Profile),
     AlreadyCurrent,
     ConcurrentChange,
 }
@@ -257,8 +273,10 @@ pub async fn run_profile_migration(
 
 trait MigrationStore {
     async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationError>;
-    async fn migrate(&self, document_id: &str)
-    -> Result<TransactionOutcome, ProfileMigrationError>;
+    async fn migrate(
+        &self,
+        target: &MigrationTarget,
+    ) -> Result<TransactionOutcome, ProfileMigrationError>;
 }
 
 struct FirestoreMigrationStore<'a> {
@@ -272,9 +290,9 @@ impl MigrationStore for FirestoreMigrationStore<'_> {
 
     async fn migrate(
         &self,
-        document_id: &str,
+        target: &MigrationTarget,
     ) -> Result<TransactionOutcome, ProfileMigrationError> {
-        migrate_one(self.db, document_id).await
+        migrate_one(self.db, target).await
     }
 }
 
@@ -299,9 +317,9 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
         ));
     };
 
-    for document_id in targets {
+    for target in targets {
         let outcome = store
-            .migrate(&document_id)
+            .migrate(&target)
             .await
             .map_err(|error| error.with_report(Some(report.clone())))?;
         match outcome {
@@ -359,34 +377,35 @@ async fn load_classified(db: &FirestoreDb) -> Result<Vec<ClassifiedRecord>, Prof
 
 async fn migrate_one(
     db: &FirestoreDb,
-    document_id: &str,
+    target: &MigrationTarget,
 ) -> Result<TransactionOutcome, ProfileMigrationError> {
-    let document_id = document_id.to_owned();
+    let target = target.clone();
     db.run_transaction(|db, transaction| {
-        let document_id = document_id.clone();
+        let target = target.clone();
         Box::pin(async move {
             let current = db
                 .fluent()
                 .select()
                 .by_id_in(PROFILES_COLLECTION)
-                .one(&document_id)
+                .one(&target.document_id)
                 .await?;
             let Some(current) = current else {
                 return Ok(TransactionOutcome::ConcurrentChange);
             };
-            match classify_document(&current).classification {
-                Classification::Current => Ok(TransactionOutcome::AlreadyCurrent),
-                Classification::Legacy(profile) => {
+            match migration_decision(&current, &target) {
+                MigrationDecision::AlreadyCurrent => Ok(TransactionOutcome::AlreadyCurrent),
+                MigrationDecision::Migrate(profile) => {
+                    let update_time = from_timestamp(target.update_time)?;
                     db.fluent()
                         .update()
                         .in_col(PROFILES_COLLECTION)
-                        .precondition(FirestoreWritePrecondition::Exists(true))
-                        .document_id(&document_id)
+                        .precondition(FirestoreWritePrecondition::UpdateTime(update_time))
+                        .document_id(&target.document_id)
                         .object(&profile)
                         .add_to_transaction(transaction)?;
                     Ok(TransactionOutcome::Migrated)
                 }
-                Classification::Blocked(_) => Ok(TransactionOutcome::ConcurrentChange),
+                MigrationDecision::ConcurrentChange => Ok(TransactionOutcome::ConcurrentChange),
             }
         })
     })
@@ -394,10 +413,22 @@ async fn migrate_one(
     .map_err(|error| migration_error_with_source(ProfileMigrationErrorKind::Write, None, error))
 }
 
+fn migration_decision(document: &FirestoreDocument, target: &MigrationTarget) -> MigrationDecision {
+    if document.update_time.as_ref() != Some(&target.update_time) {
+        return MigrationDecision::ConcurrentChange;
+    }
+    match classify_document(document).classification {
+        Classification::Current => MigrationDecision::AlreadyCurrent,
+        Classification::Legacy(profile) => MigrationDecision::Migrate(profile),
+        Classification::Blocked(_) => MigrationDecision::ConcurrentChange,
+    }
+}
+
 fn classify_document(document: &FirestoreDocument) -> ClassifiedRecord {
     let Some(document_id) = document_id(document) else {
         return ClassifiedRecord {
             document_id: document.name.clone(),
+            update_time: document.update_time,
             classification: Classification::Blocked(ProfileMigrationReason::UnexpectedShape),
         };
     };
@@ -410,7 +441,9 @@ fn classify_document(document: &FirestoreDocument) -> ClassifiedRecord {
         .into_iter()
         .collect::<BTreeSet<_>>();
     let legacy = LEGACY_FIELDS.into_iter().collect::<BTreeSet<_>>();
-    let classification = if fields == canonical {
+    let classification = if document.update_time.is_none() {
+        Classification::Blocked(ProfileMigrationReason::UnexpectedShape)
+    } else if fields == canonical {
         classify_canonical(document, &document_id)
     } else if fields == legacy {
         classify_legacy(document, &document_id)
@@ -419,6 +452,7 @@ fn classify_document(document: &FirestoreDocument) -> ClassifiedRecord {
     };
     ClassifiedRecord {
         document_id,
+        update_time: document.update_time,
         classification,
     }
 }
@@ -530,18 +564,23 @@ fn document_id(document: &FirestoreDocument) -> Option<String> {
     (!value.is_empty() && !value.contains('/')).then(|| value.to_owned())
 }
 
-fn preflight_targets(records: &[ClassifiedRecord]) -> Result<Vec<String>, ()> {
+fn preflight_targets(records: &[ClassifiedRecord]) -> Result<Vec<MigrationTarget>, ()> {
     if records
         .iter()
         .any(|record| matches!(record.classification, Classification::Blocked(_)))
     {
         return Err(());
     }
-    Ok(records
+    records
         .iter()
         .filter(|record| matches!(record.classification, Classification::Legacy(_)))
-        .map(|record| record.document_id.clone())
-        .collect())
+        .map(|record| {
+            Ok(MigrationTarget {
+                document_id: record.document_id.clone(),
+                update_time: record.update_time.ok_or(())?,
+            })
+        })
+        .collect()
 }
 
 fn report_for(
@@ -631,9 +670,13 @@ mod tests {
         format!("projects/test/databases/(default)/documents/{PROFILES_COLLECTION}/{document_id}")
     }
 
+    fn test_update_time(seconds: i64) -> Timestamp {
+        Timestamp { seconds, nanos: 0 }
+    }
+
     fn legacy_document() -> FirestoreDocument {
         let id = "user-123";
-        FirestoreDb::serialize_to_doc(
+        let mut document = FirestoreDb::serialize_to_doc(
             path(&profile_document_id(id)),
             &LegacyProfile {
                 id,
@@ -647,7 +690,9 @@ mod tests {
                 updated_at: "2026-07-30T12:05:00.999999Z",
             },
         )
-        .expect("legacy document")
+        .expect("legacy document");
+        document.update_time = Some(test_update_time(1));
+        document
     }
 
     fn canonical_profile() -> Profile {
@@ -664,10 +709,19 @@ mod tests {
         }
     }
 
+    fn canonical_document() -> FirestoreDocument {
+        let profile = canonical_profile();
+        let mut document =
+            FirestoreDb::serialize_to_doc(path(&profile_document_id(&profile.id)), &profile)
+                .expect("canonical document");
+        document.update_time = Some(test_update_time(2));
+        document
+    }
+
     struct StubMigrationStore {
         loads: Mutex<VecDeque<Result<Vec<ClassifiedRecord>, ProfileMigrationError>>>,
         outcomes: Mutex<VecDeque<Result<TransactionOutcome, ProfileMigrationError>>>,
-        migrated_ids: Mutex<Vec<String>>,
+        migrated_targets: Mutex<Vec<MigrationTarget>>,
     }
 
     impl StubMigrationStore {
@@ -688,7 +742,7 @@ mod tests {
                         .map(|result| result.map_err(|kind| migration_error(kind, None)))
                         .collect(),
                 ),
-                migrated_ids: Mutex::new(Vec::new()),
+                migrated_targets: Mutex::new(Vec::new()),
             }
         }
 
@@ -721,12 +775,12 @@ mod tests {
 
         async fn migrate(
             &self,
-            document_id: &str,
+            target: &MigrationTarget,
         ) -> Result<TransactionOutcome, ProfileMigrationError> {
-            self.migrated_ids
+            self.migrated_targets
                 .lock()
-                .expect("migration ID lock")
-                .push(document_id.to_owned());
+                .expect("migration target lock")
+                .push(target.clone());
             self.outcomes
                 .lock()
                 .expect("outcome queue lock")
@@ -761,10 +815,7 @@ mod tests {
 
     #[test]
     fn canonical_shape_is_idempotent() {
-        let profile = canonical_profile();
-        let document =
-            FirestoreDb::serialize_to_doc(path(&profile_document_id(&profile.id)), &profile)
-                .expect("canonical document");
+        let document = canonical_document();
         assert!(matches!(
             classify_document(&document).classification,
             Classification::Current
@@ -786,7 +837,9 @@ mod tests {
         );
         let mut mismatch = legacy_document();
         mismatch.name = path("uid_b3RoZXI");
-        let records = [mixed, wrong_type, mismatch]
+        let mut missing_version = legacy_document();
+        missing_version.update_time = None;
+        let records = [mixed, wrong_type, mismatch, missing_version]
             .iter()
             .map(classify_document)
             .collect::<Vec<_>>();
@@ -799,15 +852,45 @@ mod tests {
     }
 
     #[test]
+    fn migration_decision_requires_the_exact_preflight_version() {
+        let audited = classify_document(&legacy_document());
+        let target = preflight_targets(&[audited])
+            .expect("preflight")
+            .pop()
+            .expect("migration target");
+
+        let MigrationDecision::Migrate(profile) = migration_decision(&legacy_document(), &target)
+        else {
+            panic!("unchanged legacy document should migrate");
+        };
+        assert_eq!(profile, canonical_profile());
+
+        let mut changed = legacy_document();
+        changed.update_time = Some(test_update_time(2));
+        changed.fields.insert(
+            "firstname".to_owned(),
+            gcloud_sdk::google::firestore::v1::Value {
+                value_type: Some(ValueType::StringValue("Grace".to_owned())),
+            },
+        );
+        assert!(matches!(
+            migration_decision(&changed, &target),
+            MigrationDecision::ConcurrentChange
+        ));
+    }
+
+    #[test]
     fn preflight_selects_only_legacy_records_and_reports_only_hashes() {
         let legacy = classify_document(&legacy_document());
-        let profile = canonical_profile();
-        let current_document =
-            FirestoreDb::serialize_to_doc(path(&profile_document_id(&profile.id)), &profile)
-                .expect("canonical document");
-        let current = classify_document(&current_document);
+        let current = classify_document(&canonical_document());
         let targets = preflight_targets(&[legacy, current]).expect("preflight");
-        assert_eq!(targets, [profile_document_id("user-123")]);
+        assert_eq!(
+            targets,
+            [MigrationTarget {
+                document_id: profile_document_id("user-123"),
+                update_time: test_update_time(1),
+            }]
+        );
 
         let report = report_for("test", &[classify_document(&legacy_document())], 0);
         assert!(!report.records[0].fingerprint.contains("user-123"));
@@ -991,12 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn migration_engine_audits_blocks_applies_and_verifies_deterministically() {
         let legacy = classify_document(&legacy_document());
-        let current_document = FirestoreDb::serialize_to_doc(
-            path(&profile_document_id("user-123")),
-            &canonical_profile(),
-        )
-        .expect("canonical document");
-        let current = classify_document(&current_document);
+        let current = classify_document(&canonical_document());
 
         let audit_store = StubMigrationStore::new([Ok(vec![legacy.clone(), current.clone()])], []);
         let audit =
@@ -1006,10 +1084,11 @@ mod tests {
         assert_eq!(audit.current(), 1);
         assert_eq!(audit.migration_required(), 1);
         assert_eq!(audit.migrated, 0);
-        assert!(audit_store.migrated_ids.lock().unwrap().is_empty());
+        assert!(audit_store.migrated_targets.lock().unwrap().is_empty());
 
         let blocked = ClassifiedRecord {
             document_id: "blocked".to_owned(),
+            update_time: None,
             classification: Classification::Blocked(ProfileMigrationReason::UnexpectedShape),
         };
         let blocked_store = StubMigrationStore::new([Ok(vec![blocked])], []);
@@ -1030,7 +1109,7 @@ mod tests {
             blocked_error.report().map(ProfileMigrationReport::blocked),
             Some(1)
         );
-        assert!(blocked_store.migrated_ids.lock().unwrap().is_empty());
+        assert!(blocked_store.migrated_targets.lock().unwrap().is_empty());
 
         let apply_store = StubMigrationStore::new(
             [Ok(vec![legacy.clone()]), Ok(vec![current.clone()])],
@@ -1049,8 +1128,11 @@ mod tests {
         assert_eq!(applied.migration_required(), 0);
         assert_eq!(applied.migrated, 1);
         assert_eq!(
-            *apply_store.migrated_ids.lock().unwrap(),
-            vec![profile_document_id("user-123")]
+            *apply_store.migrated_targets.lock().unwrap(),
+            vec![MigrationTarget {
+                document_id: profile_document_id("user-123"),
+                update_time: test_update_time(1),
+            }]
         );
 
         let concurrent_store = StubMigrationStore::new(

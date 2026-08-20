@@ -1223,6 +1223,9 @@ fn validate_redirect(
         .join(location)
         .map_err(|_| upstream(GitHubUpstreamErrorKind::Redirect))?;
     validate_common_target(&target, base, request, GitHubUpstreamErrorKind::Redirect)?;
+    if current.path() != request.named_path && target.path() != current.path() {
+        return Err(upstream(GitHubUpstreamErrorKind::Redirect));
+    }
     if strict_query(target.query())? != request.request_query {
         return Err(upstream(GitHubUpstreamErrorKind::Redirect));
     }
@@ -2599,31 +2602,70 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_limit_loop_and_target_guards_fail_closed() {
+        let query_a = "type=owner&sort=full_name&direction=asc&per_page=20";
+        let query_b = "sort=full_name&type=owner&direction=asc&per_page=20";
+        let query_c = "direction=asc&sort=full_name&type=owner&per_page=20";
+        let query_d = "per_page=20&direction=asc&sort=full_name&type=owner";
         let three = MockGitHubTransport::new(vec![
-            redirect_response(StatusCode::FOUND, Some("/user/1")),
-            redirect_response(StatusCode::SEE_OTHER, Some("/user/2")),
-            redirect_response(StatusCode::TEMPORARY_REDIRECT, Some("/user/3")),
-            response(StatusCode::OK, owner_json()),
+            redirect_response(StatusCode::FOUND, Some(&format!("/user/1/repos?{query_a}"))),
+            redirect_response(
+                StatusCode::SEE_OTHER,
+                Some(&format!("/user/1/repos?{query_b}")),
+            ),
+            redirect_response(
+                StatusCode::TEMPORARY_REDIRECT,
+                Some(&format!("/user/1/repos?{query_c}")),
+            ),
+            response(StatusCode::OK, json!([])),
         ]);
         HttpGitHubService::with_mock(three.clone())
-            .get_owner("octocat")
+            .list_repositories("octocat", 20, None)
             .await
-            .expect("three redirects");
+            .expect("three same-identity redirects");
         assert_eq!(three.requests.lock().expect("requests").len(), 4);
 
         let four = MockGitHubTransport::new(vec![
-            redirect_response(StatusCode::FOUND, Some("/user/1")),
-            redirect_response(StatusCode::FOUND, Some("/user/2")),
-            redirect_response(StatusCode::FOUND, Some("/user/3")),
-            redirect_response(StatusCode::PERMANENT_REDIRECT, Some("/user/4")),
+            redirect_response(StatusCode::FOUND, Some(&format!("/user/1/repos?{query_a}"))),
+            redirect_response(StatusCode::FOUND, Some(&format!("/user/1/repos?{query_b}"))),
+            redirect_response(StatusCode::FOUND, Some(&format!("/user/1/repos?{query_c}"))),
+            redirect_response(
+                StatusCode::PERMANENT_REDIRECT,
+                Some(&format!("/user/1/repos?{query_d}")),
+            ),
         ]);
         assert_upstream(
             HttpGitHubService::with_mock(four.clone())
-                .get_owner("octocat")
+                .list_repositories("octocat", 20, None)
                 .await,
             GitHubUpstreamErrorKind::Redirect,
         );
         assert_eq!(four.requests.lock().expect("requests").len(), 4);
+
+        for (segments, first, second) in [
+            (vec!["users", "octocat"], "/user/1", "/user/2"),
+            (
+                vec!["repos", "octocat", "hello-world"],
+                "/repositories/1",
+                "/repositories/2",
+            ),
+        ] {
+            let first_response = redirect_response(StatusCode::FOUND, Some(first));
+            let first_reads = Arc::clone(&first_response.body_reads);
+            let second_response = redirect_response(StatusCode::FOUND, Some(second));
+            let second_reads = Arc::clone(&second_response.body_reads);
+            let transport = MockGitHubTransport::new(vec![first_response, second_response]);
+            let service = HttpGitHubService::with_mock(transport.clone());
+            let request = service
+                .operation_request(&segments, "", Vec::new(), NavigationKind::None)
+                .expect("request");
+            assert_upstream(
+                service.send_terminal(request).await,
+                GitHubUpstreamErrorKind::Redirect,
+            );
+            assert_eq!(transport.requests.lock().expect("requests").len(), 2);
+            assert_eq!(first_reads.load(Ordering::SeqCst), 0);
+            assert_eq!(second_reads.load(Ordering::SeqCst), 0);
+        }
 
         for location in [
             "/users/octocat",
