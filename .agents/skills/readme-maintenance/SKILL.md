@@ -20,7 +20,7 @@ Read `AGENTS.md`, then verify every affected `README.md` claim against the curre
 
 - Require every named route, path, recipe, environment variable, version, and default to exist.
 - Keep the Rust pin aligned across the toolchain, manifest, workflows, container, and README.
-- Describe `/health` as the root liveness endpoint, `/v1/openapi` as the OpenAPI document, and `/api-docs` as Swagger UI.
+- Describe `/health` as the root liveness endpoint, `/openapi.json` as the OpenAPI document, and `/api-docs` as Swagger UI.
 - State only the JSON and CBOR request or response behavior that the affected route implements. Reflect the current Problem Details media types without implying a standard the code does not implement.
 - Describe Firebase production verification, emulator configuration, Firestore-backed behavior, and Application Default Credentials according to the current code; do not imply all runtime configuration fields are already wired to every client.
 - Keep local development, emulator, container, Cloud Build, Cloud Run, CI, and coverage guidance aligned with committed commands and assets.

@@ -24,6 +24,8 @@ const COMMON_RESPONSE_HEADERS: [&str; 5] = [
     "X-Frame-Options",
     "Referrer-Policy",
 ];
+const STRICT_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; frame-ancestors 'none'";
+const SWAGGER_UI_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'";
 
 struct OperationExpectation {
     path: &'static str,
@@ -642,7 +644,7 @@ async fn discovery_is_exposed_only_at_the_canonical_root_path() {
 }
 
 #[tokio::test]
-async fn swagger_ui_is_mounted() {
+async fn swagger_ui_assets_use_a_scoped_content_security_policy() {
     let app = build_app(test_state());
     let redirect = app
         .clone()
@@ -656,8 +658,13 @@ async fn swagger_ui_is_mounted() {
         .expect("request should complete");
     assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
     assert_eq!(redirect.headers()[header::LOCATION], "/api-docs/");
+    assert_eq!(
+        redirect.headers()["content-security-policy"],
+        STRICT_CONTENT_SECURITY_POLICY
+    );
 
     let page = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api-docs/")
@@ -667,6 +674,10 @@ async fn swagger_ui_is_mounted() {
         .await
         .expect("request should complete");
     assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(
+        page.headers()["content-security-policy"],
+        SWAGGER_UI_CONTENT_SECURITY_POLICY
+    );
     assert!(
         page.headers()[header::CONTENT_TYPE]
             .to_str()
@@ -675,6 +686,47 @@ async fn swagger_ui_is_mounted() {
     );
     let html = read_text_body(page).await;
     assert!(html.to_ascii_lowercase().contains("swagger ui"));
+    for asset in [
+        "swagger-ui.css",
+        "swagger-ui-bundle.js",
+        "swagger-ui-standalone-preset.js",
+        "swagger-initializer.js",
+    ] {
+        assert!(html.contains(asset), "missing Swagger UI asset: {asset}");
+    }
+
+    let initializer = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api-docs/swagger-initializer.js")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete");
+    assert_eq!(initializer.status(), StatusCode::OK);
+    let initializer = read_text_body(initializer).await;
+    assert!(initializer.contains(r#""url": "/openapi.json""#));
+    assert!(initializer.contains(r#""validatorUrl": "none""#));
+
+    for path in ["/openapi.json", "/api-docs/missing.js"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            STRICT_CONTENT_SECURITY_POLICY,
+            "{path}"
+        );
+    }
 }
 
 async fn served_document() -> Value {

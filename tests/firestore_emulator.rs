@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use axum_playground::{
-    AppConfig, AppState, CreateProfileParams, ProfileServiceError, UpdateProfileParams,
+    AppConfig, AppState, CreateProfileParams, ProfileService, ProfileServiceError,
+    UpdateProfileParams,
     profile_migration::{ProfileMigrationErrorKind, ProfileMigrationMode, run_profile_migration},
 };
 use serde_json::{Value, json};
@@ -10,6 +11,8 @@ const EMULATOR_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const EMULATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const PROJECT_ID: &str = "demo-test-project";
 const USER_ID: &str = "tenant/user";
+const NONCANONICAL_USER_ID: &str = "corrupt/user";
+const NONCANONICAL_DOCUMENT_ID: &str = "uid_Y29ycnVwdC91c2Vy";
 
 #[tokio::test]
 #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
@@ -30,6 +33,7 @@ async fn firestore_profile_service_and_migration_round_trip_when_emulator_is_con
     let state = AppState::new(config).expect("loopback emulator configuration should be valid");
 
     let service = &state.profile_service;
+    verify_noncanonical_profile_is_rejected_without_writes(service, &emulator_host).await;
 
     let created = service
         .create(
@@ -101,6 +105,57 @@ async fn firestore_profile_service_and_migration_round_trip_when_emulator_is_con
     assert!(matches!(missing, ProfileServiceError::NotFound));
 
     flush_emulator(&emulator_host, PROJECT_ID).await;
+}
+
+async fn verify_noncanonical_profile_is_rejected_without_writes(
+    service: &ProfileService,
+    host: &str,
+) {
+    create_noncanonical_document(host).await;
+
+    let duplicate = service
+        .create(
+            NONCANONICAL_USER_ID,
+            CreateProfileParams {
+                first_name: "Replacement".to_owned(),
+                last_name: "User".to_owned(),
+                contact_email: "replacement@example.com".to_owned(),
+                phone_number: "+358401234567".to_owned(),
+                marketing_opt_in: false,
+                terms_accepted: true,
+            },
+        )
+        .await
+        .expect_err("an existing noncanonical document must not be replaced");
+    assert!(matches!(duplicate, ProfileServiceError::AlreadyExists));
+
+    let read = service
+        .get(NONCANONICAL_USER_ID)
+        .await
+        .expect_err("noncanonical document must not be served");
+    assert!(matches!(read, ProfileServiceError::Backend(_)));
+
+    let update = service
+        .update(
+            NONCANONICAL_USER_ID,
+            UpdateProfileParams {
+                first_name: Some("Replacement".to_owned()),
+                ..UpdateProfileParams::default()
+            },
+        )
+        .await
+        .expect_err("noncanonical document must not be rewritten");
+    assert!(matches!(update, ProfileServiceError::Backend(_)));
+
+    let delete = service
+        .delete(NONCANONICAL_USER_ID)
+        .await
+        .expect_err("noncanonical document must not be deleted");
+    assert!(matches!(delete, ProfileServiceError::Backend(_)));
+
+    let unchanged = get_document(host, NONCANONICAL_DOCUMENT_ID).await;
+    assert!(unchanged["fields"].get("legacyField").is_some());
+    assert_eq!(unchanged["fields"]["firstName"]["stringValue"], "Corrupt");
 }
 
 async fn verify_migration_preflight_is_write_free(config: &AppConfig, host: &str) {
@@ -189,6 +244,35 @@ async fn create_legacy_document(host: &str, document_id: &str, id: &str, mixed: 
     assert!(
         response.status().is_success(),
         "legacy seed: {}",
+        response.status()
+    );
+}
+
+async fn create_noncanonical_document(host: &str) {
+    let fields = json!({
+        "id": {"stringValue": NONCANONICAL_USER_ID},
+        "firstName": {"stringValue": "Corrupt"},
+        "lastName": {"stringValue": "Record"},
+        "contactEmail": {"stringValue": "corrupt@example.com"},
+        "phoneNumber": {"stringValue": "+358401234567"},
+        "marketingOptIn": {"booleanValue": false},
+        "termsAccepted": {"booleanValue": true},
+        "createdAt": {"stringValue": "2026-07-30T12:00:00.000Z"},
+        "updatedAt": {"stringValue": "2026-07-30T12:00:00.000Z"},
+        "legacyField": {"stringValue": "must survive"}
+    });
+    let url = format!(
+        "http://{host}/v1/projects/{PROJECT_ID}/databases/(default)/documents/profiles?documentId={NONCANONICAL_DOCUMENT_ID}"
+    );
+    let response = reqwest::Client::new()
+        .post(url)
+        .json(&json!({"fields": fields}))
+        .send()
+        .await
+        .expect("seed noncanonical profile");
+    assert!(
+        response.status().is_success(),
+        "noncanonical seed: {}",
         response.status()
     );
 }

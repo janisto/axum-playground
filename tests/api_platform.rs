@@ -365,6 +365,33 @@ async fn portable_operations_do_not_expose_trailing_slash_aliases() {
     }
 }
 
+#[tokio::test]
+async fn malformed_github_paths_are_not_classified_as_registered_head_routes() {
+    let app = build_app(test_state());
+    for path in [
+        "//v1/github/owners/octocat",
+        "///v1/github/repos/octocat/hello-world",
+    ] {
+        for method in [Method::GET, Method::HEAD] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should complete");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert!(!response.headers().contains_key(header::ALLOW));
+            assert_common_headers(&response, true);
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn panic_recovery_returns_a_safe_problem_and_does_not_log_the_payload() {
     let logs = Arc::new(Mutex::new(Vec::new()));

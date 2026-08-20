@@ -77,7 +77,9 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 pub fn ui_router() -> Router<Arc<AppState>> {
-    Router::new().merge(SwaggerUi::new("/api-docs").config(Config::from("/openapi.json")))
+    Router::new().merge(
+        SwaggerUi::new("/api-docs").config(Config::from("/openapi.json").validator_url("none")),
+    )
 }
 
 pub async fn openapi_handler(format: JsonResponseFormat, _query: NoQuery) -> Response {

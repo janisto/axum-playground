@@ -1,6 +1,6 @@
 //! One-time migration from the retired profile persistence shape.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{FirestoreDb, FirestoreDocument, FirestoreWritePrecondition};
@@ -12,23 +12,12 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     AppConfig,
     services::profile::{
-        PROFILES_COLLECTION, Profile, new_firestore_db, profile_document_id,
-        validate_stored_profile,
+        CANONICAL_PROFILE_FIELDS, PROFILES_COLLECTION, Profile, new_firestore_db,
+        profile_document_id, validate_stored_profile,
     },
     validation::{canonical_clock_timestamp, normalize_contact_email, normalize_phone_number},
 };
 
-const CANONICAL_FIELDS: [&str; 9] = [
-    "contactEmail",
-    "createdAt",
-    "firstName",
-    "id",
-    "lastName",
-    "marketingOptIn",
-    "phoneNumber",
-    "termsAccepted",
-    "updatedAt",
-];
 const LEGACY_FIELDS: [&str; 9] = [
     "createdAt",
     "email",
@@ -141,6 +130,7 @@ pub enum ProfileMigrationErrorKind {
 pub struct ProfileMigrationError {
     kind: ProfileMigrationErrorKind,
     report: Option<ProfileMigrationReport>,
+    source: Option<Arc<dyn Error + Send + Sync>>,
 }
 
 impl ProfileMigrationError {
@@ -153,6 +143,21 @@ impl ProfileMigrationError {
     pub fn report(&self) -> Option<&ProfileMigrationReport> {
         self.report.as_ref()
     }
+
+    fn with_report(mut self, report: Option<ProfileMigrationReport>) -> Self {
+        self.report = report;
+        self
+    }
+
+    fn reclassify(
+        mut self,
+        kind: ProfileMigrationErrorKind,
+        report: Option<ProfileMigrationReport>,
+    ) -> Self {
+        self.kind = kind;
+        self.report = report;
+        self
+    }
 }
 
 impl fmt::Debug for ProfileMigrationError {
@@ -161,6 +166,7 @@ impl fmt::Debug for ProfileMigrationError {
             .debug_struct("ProfileMigrationError")
             .field("kind", &self.kind)
             .field("has_report", &self.report.is_some())
+            .field("has_source", &self.source.is_some())
             .finish()
     }
 }
@@ -189,7 +195,13 @@ impl fmt::Display for ProfileMigrationError {
     }
 }
 
-impl Error for ProfileMigrationError {}
+impl Error for ProfileMigrationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn Error + 'static))
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ClassifiedRecord {
@@ -237,16 +249,16 @@ pub async fn run_profile_migration(
 
     let db = new_firestore_db(project_id, config.firestore_emulator_host.as_deref())
         .await
-        .map_err(|_| migration_error(ProfileMigrationErrorKind::Initialize, None))?;
+        .map_err(|error| {
+            migration_error_with_source(ProfileMigrationErrorKind::Initialize, None, error)
+        })?;
     run_profile_migration_with_store(project_id, &mode, &FirestoreMigrationStore { db: &db }).await
 }
 
 trait MigrationStore {
-    async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationErrorKind>;
-    async fn migrate(
-        &self,
-        document_id: &str,
-    ) -> Result<TransactionOutcome, ProfileMigrationErrorKind>;
+    async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationError>;
+    async fn migrate(&self, document_id: &str)
+    -> Result<TransactionOutcome, ProfileMigrationError>;
 }
 
 struct FirestoreMigrationStore<'a> {
@@ -254,14 +266,14 @@ struct FirestoreMigrationStore<'a> {
 }
 
 impl MigrationStore for FirestoreMigrationStore<'_> {
-    async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationErrorKind> {
-        load_classified(self.db).await.map_err(|error| error.kind())
+    async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationError> {
+        load_classified(self.db).await
     }
 
     async fn migrate(
         &self,
         document_id: &str,
-    ) -> Result<TransactionOutcome, ProfileMigrationErrorKind> {
+    ) -> Result<TransactionOutcome, ProfileMigrationError> {
         migrate_one(self.db, document_id).await
     }
 }
@@ -274,7 +286,7 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
     let classified = store
         .load()
         .await
-        .map_err(|kind| migration_error(kind, None))?;
+        .map_err(|error| error.with_report(None))?;
     let mut report = report_for(project_id, &classified, 0);
     if *mode == ProfileMigrationMode::Audit {
         return Ok(report);
@@ -291,7 +303,7 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
         let outcome = store
             .migrate(&document_id)
             .await
-            .map_err(|kind| migration_error(kind, Some(report.clone())))?;
+            .map_err(|error| error.with_report(Some(report.clone())))?;
         match outcome {
             TransactionOutcome::Migrated => report.migrated += 1,
             TransactionOutcome::AlreadyCurrent => {}
@@ -304,8 +316,8 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
         }
     }
 
-    let verified = store.load().await.map_err(|_| {
-        migration_error(
+    let verified = store.load().await.map_err(|error| {
+        error.reclassify(
             ProfileMigrationErrorKind::Verification,
             Some(report.clone()),
         )
@@ -331,11 +343,14 @@ async fn load_classified(db: &FirestoreDb) -> Result<Vec<ClassifiedRecord>, Prof
         .from(PROFILES_COLLECTION)
         .stream_query_with_errors()
         .await
-        .map_err(|_| migration_error(ProfileMigrationErrorKind::Read, None))?;
+        .map_err(|error| {
+            migration_error_with_source(ProfileMigrationErrorKind::Read, None, error)
+        })?;
     let mut records = Vec::new();
     while let Some(document) = stream.next().await {
-        let document =
-            document.map_err(|_| migration_error(ProfileMigrationErrorKind::Read, None))?;
+        let document = document.map_err(|error| {
+            migration_error_with_source(ProfileMigrationErrorKind::Read, None, error)
+        })?;
         records.push(classify_document(&document));
     }
     records.sort_by(|left, right| left.document_id.cmp(&right.document_id));
@@ -345,7 +360,7 @@ async fn load_classified(db: &FirestoreDb) -> Result<Vec<ClassifiedRecord>, Prof
 async fn migrate_one(
     db: &FirestoreDb,
     document_id: &str,
-) -> Result<TransactionOutcome, ProfileMigrationErrorKind> {
+) -> Result<TransactionOutcome, ProfileMigrationError> {
     let document_id = document_id.to_owned();
     db.run_transaction(|db, transaction| {
         let document_id = document_id.clone();
@@ -376,7 +391,7 @@ async fn migrate_one(
         })
     })
     .await
-    .map_err(|_| ProfileMigrationErrorKind::Write)
+    .map_err(|error| migration_error_with_source(ProfileMigrationErrorKind::Write, None, error))
 }
 
 fn classify_document(document: &FirestoreDocument) -> ClassifiedRecord {
@@ -391,7 +406,9 @@ fn classify_document(document: &FirestoreDocument) -> ClassifiedRecord {
         .keys()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let canonical = CANONICAL_FIELDS.into_iter().collect::<BTreeSet<_>>();
+    let canonical = CANONICAL_PROFILE_FIELDS
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let legacy = LEGACY_FIELDS.into_iter().collect::<BTreeSet<_>>();
     let classification = if fields == canonical {
         classify_canonical(document, &document_id)
@@ -568,7 +585,23 @@ fn migration_error(
     kind: ProfileMigrationErrorKind,
     report: Option<ProfileMigrationReport>,
 ) -> ProfileMigrationError {
-    ProfileMigrationError { kind, report }
+    ProfileMigrationError {
+        kind,
+        report,
+        source: None,
+    }
+}
+
+fn migration_error_with_source(
+    kind: ProfileMigrationErrorKind,
+    report: Option<ProfileMigrationReport>,
+    source: impl Error + Send + Sync + 'static,
+) -> ProfileMigrationError {
+    ProfileMigrationError {
+        kind,
+        report,
+        source: Some(Arc::new(source)),
+    }
 }
 
 #[cfg(test)]
@@ -632,8 +665,8 @@ mod tests {
     }
 
     struct StubMigrationStore {
-        loads: Mutex<VecDeque<Result<Vec<ClassifiedRecord>, ProfileMigrationErrorKind>>>,
-        outcomes: Mutex<VecDeque<Result<TransactionOutcome, ProfileMigrationErrorKind>>>,
+        loads: Mutex<VecDeque<Result<Vec<ClassifiedRecord>, ProfileMigrationError>>>,
+        outcomes: Mutex<VecDeque<Result<TransactionOutcome, ProfileMigrationError>>>,
         migrated_ids: Mutex<Vec<String>>,
     }
 
@@ -643,26 +676,53 @@ mod tests {
             outcomes: impl IntoIterator<Item = Result<TransactionOutcome, ProfileMigrationErrorKind>>,
         ) -> Self {
             Self {
-                loads: Mutex::new(loads.into_iter().collect()),
-                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                loads: Mutex::new(
+                    loads
+                        .into_iter()
+                        .map(|result| result.map_err(|kind| migration_error(kind, None)))
+                        .collect(),
+                ),
+                outcomes: Mutex::new(
+                    outcomes
+                        .into_iter()
+                        .map(|result| result.map_err(|kind| migration_error(kind, None)))
+                        .collect(),
+                ),
                 migrated_ids: Mutex::new(Vec::new()),
             }
+        }
+
+        fn push_load_error(&self, kind: ProfileMigrationErrorKind, message: &'static str) {
+            self.loads.lock().expect("load queue lock").push_back(Err(
+                migration_error_with_source(kind, None, std::io::Error::other(message)),
+            ));
+        }
+
+        fn push_outcome_error(&self, kind: ProfileMigrationErrorKind, message: &'static str) {
+            self.outcomes
+                .lock()
+                .expect("outcome queue lock")
+                .push_back(Err(migration_error_with_source(
+                    kind,
+                    None,
+                    std::io::Error::other(message),
+                )));
         }
     }
 
     impl MigrationStore for StubMigrationStore {
-        async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationErrorKind> {
+        async fn load(&self) -> Result<Vec<ClassifiedRecord>, ProfileMigrationError> {
             self.loads
                 .lock()
                 .expect("load queue lock")
                 .pop_front()
-                .unwrap_or(Err(ProfileMigrationErrorKind::Read))
+                .unwrap_or_else(|| Err(migration_error(ProfileMigrationErrorKind::Read, None)))
         }
 
         async fn migrate(
             &self,
             document_id: &str,
-        ) -> Result<TransactionOutcome, ProfileMigrationErrorKind> {
+        ) -> Result<TransactionOutcome, ProfileMigrationError> {
             self.migrated_ids
                 .lock()
                 .expect("migration ID lock")
@@ -671,7 +731,7 @@ mod tests {
                 .lock()
                 .expect("outcome queue lock")
                 .pop_front()
-                .unwrap_or(Err(ProfileMigrationErrorKind::Write))
+                .unwrap_or_else(|| Err(migration_error(ProfileMigrationErrorKind::Write, None)))
         }
     }
 
@@ -691,7 +751,9 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            CANONICAL_FIELDS.into_iter().collect::<BTreeSet<_>>()
+            CANONICAL_PROFILE_FIELDS
+                .into_iter()
+                .collect::<BTreeSet<_>>()
         );
         assert!(!replacement.fields.contains_key("firstname"));
         assert!(!replacement.fields.contains_key("email"));
@@ -847,7 +909,83 @@ mod tests {
             let debug = format!("{error:?}");
             assert!(debug.contains(&format!("kind: {kind:?}")));
             assert!(debug.contains("has_report: true"));
+            assert!(debug.contains("has_source: false"));
         }
+    }
+
+    #[tokio::test]
+    async fn migration_engine_preserves_dependency_sources_without_exposing_them() {
+        let read_store = StubMigrationStore::new([], []);
+        read_store.push_load_error(ProfileMigrationErrorKind::Read, "private read sentinel");
+        let read_error =
+            run_profile_migration_with_store("test", &ProfileMigrationMode::Audit, &read_store)
+                .await
+                .expect_err("read failure");
+        assert_migration_source(
+            &read_error,
+            ProfileMigrationErrorKind::Read,
+            "private read sentinel",
+            false,
+        );
+
+        let legacy = classify_document(&legacy_document());
+        let write_store = StubMigrationStore::new([Ok(vec![legacy.clone()])], []);
+        write_store.push_outcome_error(ProfileMigrationErrorKind::Write, "private write sentinel");
+        let write_error = run_profile_migration_with_store(
+            "test",
+            &ProfileMigrationMode::Apply {
+                confirmed_project: "test".to_owned(),
+            },
+            &write_store,
+        )
+        .await
+        .expect_err("write failure");
+        assert_migration_source(
+            &write_error,
+            ProfileMigrationErrorKind::Write,
+            "private write sentinel",
+            true,
+        );
+
+        let verification_store =
+            StubMigrationStore::new([Ok(vec![legacy])], [Ok(TransactionOutcome::AlreadyCurrent)]);
+        verification_store.push_load_error(
+            ProfileMigrationErrorKind::Read,
+            "private verification sentinel",
+        );
+        let verification_error = run_profile_migration_with_store(
+            "test",
+            &ProfileMigrationMode::Apply {
+                confirmed_project: "test".to_owned(),
+            },
+            &verification_store,
+        )
+        .await
+        .expect_err("verification read failure");
+        assert_migration_source(
+            &verification_error,
+            ProfileMigrationErrorKind::Verification,
+            "private verification sentinel",
+            true,
+        );
+    }
+
+    fn assert_migration_source(
+        error: &ProfileMigrationError,
+        kind: ProfileMigrationErrorKind,
+        source: &str,
+        has_report: bool,
+    ) {
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.report().is_some(), has_report);
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some(source)
+        );
+        assert!(!error.to_string().contains(source));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(source));
+        assert!(debug.contains("has_source: true"));
     }
 
     #[tokio::test]

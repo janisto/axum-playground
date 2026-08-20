@@ -24,7 +24,7 @@ Do not open network ports for ordinary tests, contact live services, add product
 - Exercise JSON and CBOR only where the route implements both, including request and response selection when relevant.
 - Assert validation and authentication stop service execution. Assert cleanup, state mutation, and forbidden side effects at service boundaries.
 - For pagination, distinguish first, middle, and terminal pages and cover malformed, wrong-kind, stale, and boundary cursors.
-- For OpenAPI changes, inspect `/v1/openapi` for the affected path, status, headers, and media types instead of snapshotting the whole document.
+- For OpenAPI changes, inspect `/openapi.json` for the affected path, status, headers, and media types instead of snapshotting the whole document.
 - Ask which plausible removal, inversion, off-by-one error, or stale-state bug each test catches; strengthen or remove cases that would survive the mutation.
 
 ## Commands

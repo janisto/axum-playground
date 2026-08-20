@@ -10,7 +10,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{
-    FirestoreDb, FirestoreDbOptions, FirestoreWritePrecondition, errors::FirestoreError,
+    FirestoreDb, FirestoreDbOptions, FirestoreDocument, FirestoreWritePrecondition,
+    errors::FirestoreError,
 };
 use gcloud_sdk::{ExternalJwtFunctionSource, Token, TokenSourceType};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,17 @@ use crate::{
 };
 
 pub(crate) const PROFILES_COLLECTION: &str = "profiles";
+pub(crate) const CANONICAL_PROFILE_FIELDS: [&str; 9] = [
+    "contactEmail",
+    "createdAt",
+    "firstName",
+    "id",
+    "lastName",
+    "marketingOptIn",
+    "phoneNumber",
+    "termsAccepted",
+    "updatedAt",
+];
 const FIRESTORE_API_URL: &str = "https://firestore.googleapis.com";
 const EMULATOR_BEARER_TOKEN: &str = "owner";
 const EMULATOR_TOKEN_EXPIRY: &str = "9999-12-31T23:59:59Z";
@@ -149,7 +161,7 @@ pub enum ProfileServiceError {
     #[error("profile already exists")]
     AlreadyExists,
     #[error("profile service unavailable")]
-    Unavailable(ProfileBackendError),
+    Unavailable(#[source] ProfileBackendError),
     #[error(transparent)]
     Backend(#[from] ProfileBackendError),
 }
@@ -471,11 +483,10 @@ impl FirestoreProfileStore {
                 let document_id = document_id.clone();
                 let profile = profile.clone();
                 Box::pin(async move {
-                    let existing: Option<StoredProfile> = db
+                    let existing: Option<FirestoreDocument> = db
                         .fluent()
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
-                        .obj()
                         .one(&document_id)
                         .await?;
                     if existing.is_some() {
@@ -501,15 +512,15 @@ impl FirestoreProfileStore {
     async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
         let document_id = profile_document_id(user_id);
-        let profile: Option<StoredProfile> = db
+        let profile: Option<FirestoreDocument> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
-            .obj()
             .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileOperation::Get))?;
-        let profile: Profile = profile.ok_or(ProfileServiceError::NotFound)?.into();
+        let profile = decode_stored_profile(&profile.ok_or(ProfileServiceError::NotFound)?)
+            .map_err(|error| map_firestore_error(error, ProfileOperation::Get))?;
         validate_stored_profile(&profile, user_id, ProfileOperation::Get)?;
         Ok(profile)
     }
@@ -529,16 +540,16 @@ impl FirestoreProfileStore {
                 let user_id = user_id.clone();
                 let params = params.clone();
                 Box::pin(async move {
-                    let current: Option<StoredProfile> = db
+                    let current: Option<FirestoreDocument> = db
                         .fluent()
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
-                        .obj()
                         .one(&document_id)
                         .await?;
-                    let Some(current) = current.map(Profile::from) else {
+                    let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
                     };
+                    let current = decode_stored_profile(&current)?;
                     if validate_stored_profile(&current, &user_id, ProfileOperation::Update)
                         .is_err()
                     {
@@ -567,19 +578,26 @@ impl FirestoreProfileStore {
     async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         let db = self.db().await?;
         let document_id = profile_document_id(user_id);
+        let user_id = user_id.to_owned();
         let result = db
             .run_transaction(|db, transaction| {
                 let document_id = document_id.clone();
+                let user_id = user_id.clone();
                 Box::pin(async move {
-                    let current: Option<StoredProfile> = db
+                    let current: Option<FirestoreDocument> = db
                         .fluent()
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
-                        .obj()
                         .one(&document_id)
                         .await?;
-                    if current.is_none() {
+                    let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
+                    };
+                    let current = decode_stored_profile(&current)?;
+                    if validate_stored_profile(&current, &user_id, ProfileOperation::Delete)
+                        .is_err()
+                    {
+                        return Ok(TransactionOutcome::TimestampExhausted);
                     }
                     db.fluent()
                         .delete()
@@ -641,6 +659,19 @@ fn firestore_db_options(project_id: &str, emulator_host: Option<&str>) -> Firest
 
 pub(crate) fn profile_document_id(user_id: &str) -> String {
     format!("uid_{}", URL_SAFE_NO_PAD.encode(user_id))
+}
+
+fn decode_stored_profile(document: &FirestoreDocument) -> Result<Profile, FirestoreError> {
+    let exact_fields = document.fields.len() == CANONICAL_PROFILE_FIELDS.len()
+        && CANONICAL_PROFILE_FIELDS
+            .iter()
+            .all(|field| document.fields.contains_key(*field));
+    if !exact_fields {
+        return Err(<FirestoreError as serde::de::Error>::custom(
+            "unexpected persisted profile fields",
+        ));
+    }
+    FirestoreDb::deserialize_doc_to::<StoredProfile>(document).map(Profile::from)
 }
 
 fn build_profile(
@@ -756,9 +787,9 @@ mod tests {
 
     use super::{
         CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
-        ProfileServiceError, StoredProfile, TransactionOutcome, UpdateProfileParams,
-        create_transaction_result, delete_transaction_result, map_firestore_error,
-        profile_document_id, update_transaction_result, validate_stored_profile,
+        ProfileServiceError, TransactionOutcome, UpdateProfileParams, create_transaction_result,
+        decode_stored_profile, delete_transaction_result, map_firestore_error, profile_document_id,
+        update_transaction_result, validate_stored_profile,
     };
 
     fn create_params(first_name: &str) -> CreateProfileParams {
@@ -797,10 +828,16 @@ mod tests {
             &profile,
         )
         .expect("serialize profile");
-        let decoded: StoredProfile =
-            FirestoreDb::deserialize_doc_to(&document).expect("deserialize profile");
-        let decoded = Profile::from(decoded);
+        let decoded = decode_stored_profile(&document).expect("deserialize profile");
         assert_eq!(decoded, profile);
+
+        for field in ["legacyField", "_firestore_id"] {
+            let mut noncanonical = document.clone();
+            let extra_value = noncanonical.fields["id"].clone();
+            noncanonical.fields.insert(field.to_owned(), extra_value);
+            decode_stored_profile(&noncanonical)
+                .expect_err("noncanonical persisted fields must be rejected");
+        }
     }
 
     #[test]
@@ -818,6 +855,13 @@ mod tests {
         assert_eq!(
             error.source().map(ToString::to_string).as_deref(),
             Some("private sentinel")
+        );
+
+        let unavailable = ProfileServiceError::Unavailable(error);
+        assert_eq!(unavailable.to_string(), "profile service unavailable");
+        assert_eq!(
+            unavailable.source().map(ToString::to_string).as_deref(),
+            Some("profile get backend error")
         );
 
         for (operation, expected) in [

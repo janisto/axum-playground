@@ -5,8 +5,17 @@ use axum::{
     response::Response,
 };
 
+const STRICT_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; frame-ancestors 'none'";
+const SWAGGER_UI_CONTENT_SECURITY_POLICY: &str = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'";
+
 pub async fn security_headers_middleware(request: Request, next: Next) -> Response {
+    let request_path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
+    let content_security_policy = if is_swagger_ui_document(&request_path, response.headers()) {
+        SWAGGER_UI_CONTENT_SECURITY_POLICY
+    } else {
+        STRICT_CONTENT_SECURITY_POLICY
+    };
     let headers = response.headers_mut();
     set_header_if_missing(
         headers,
@@ -16,7 +25,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     set_header_if_missing(
         headers,
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+        HeaderValue::from_static(content_security_policy),
     );
     set_header_if_missing(
         headers,
@@ -52,6 +61,15 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     );
 
     response
+}
+
+fn is_swagger_ui_document(path: &str, headers: &HeaderMap) -> bool {
+    path.starts_with("/api-docs/")
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/html"))
 }
 
 fn set_header_if_missing(headers: &mut HeaderMap, name: HeaderName, value: HeaderValue) {

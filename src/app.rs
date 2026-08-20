@@ -107,7 +107,10 @@ fn portable_allow(path: &str) -> Option<HeaderValue> {
 }
 
 fn is_github_path(path: &str) -> bool {
-    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let Some(path) = path.strip_prefix('/') else {
+        return false;
+    };
+    let segments = path.split('/').collect::<Vec<_>>();
     matches!(
         segments.as_slice(),
         ["v1", "github", "owners", _]
@@ -158,6 +161,8 @@ mod tests {
         }
 
         for path in [
+            "v1/github/owners/octocat",
+            "//v1/github/owners/octocat",
             "/missing",
             "/v1/github",
             "/v1/github/owners",
