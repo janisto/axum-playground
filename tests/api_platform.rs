@@ -371,6 +371,8 @@ async fn malformed_github_paths_are_not_classified_as_registered_head_routes() {
     for path in [
         "//v1/github/owners/octocat",
         "///v1/github/repos/octocat/hello-world",
+        "/v1/github/owners/",
+        "/v1/github/repos/octocat/",
     ] {
         for method in [Method::GET, Method::HEAD] {
             let response = app
@@ -390,6 +392,57 @@ async fn malformed_github_paths_are_not_classified_as_registered_head_routes() {
             assert_common_headers(&response, true);
         }
     }
+}
+
+#[tokio::test]
+async fn empty_intermediate_github_parameters_keep_registered_method_semantics() {
+    let github = MockGitHubService::demo();
+    let app = build_app(state_with(
+        MockAuthVerifier::test_user(),
+        github.clone(),
+        MockProfileService::default(),
+    ));
+    for path in [
+        "/v1/github/owners//repos",
+        "/v1/github/repos//hello-world",
+        "/v1/github/repos/octocat//tags",
+    ] {
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(get.status(), StatusCode::UNPROCESSABLE_ENTITY, "GET {path}");
+        assert!(!get.headers().contains_key(header::ALLOW), "GET {path}");
+
+        let head = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(head.status(), StatusCode::METHOD_NOT_ALLOWED, "HEAD {path}");
+        assert_eq!(head.headers()[header::ALLOW], "GET", "HEAD {path}");
+        assert!(
+            to_bytes(head.into_body(), usize::MAX)
+                .await
+                .expect("response body should be readable")
+                .is_empty(),
+            "HEAD {path}"
+        );
+    }
+    assert_eq!(github.call_count(), 0);
 }
 
 #[tokio::test]

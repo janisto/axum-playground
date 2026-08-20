@@ -2,10 +2,12 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
+    future::Future,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -44,6 +46,7 @@ pub(crate) const CANONICAL_PROFILE_FIELDS: [&str; 9] = [
 const FIRESTORE_API_URL: &str = "https://firestore.googleapis.com";
 const EMULATOR_BEARER_TOKEN: &str = "owner";
 const EMULATOR_TOKEN_EXPIRY: &str = "9999-12-31T23:59:59Z";
+const PROFILE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct ProfileService {
@@ -70,6 +73,7 @@ pub struct MockProfileService {
     operations: Arc<Mutex<Vec<ProfileOperation>>>,
     now: Arc<Mutex<OffsetDateTime>>,
     error: Option<ProfileServiceError>,
+    delay: Option<Duration>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -85,6 +89,7 @@ impl Default for MockProfileService {
             operations: Arc::new(Mutex::new(Vec::new())),
             now: Arc::new(Mutex::new(datetime!(2026-07-30 12:00 UTC))),
             error: None,
+            delay: None,
         }
     }
 }
@@ -261,17 +266,25 @@ impl ProfileService {
         user_id: &str,
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
-        match self.inner.as_ref() {
-            ProfileServiceInner::Firestore(store) => store.create(user_id, params).await,
-            ProfileServiceInner::Mock(store) => store.create(user_id, params),
-        }
+        let operation = ProfileOperation::Create;
+        Self::with_deadline(operation, async {
+            match self.inner.as_ref() {
+                ProfileServiceInner::Firestore(store) => store.create(user_id, params).await,
+                ProfileServiceInner::Mock(store) => store.create(user_id, params).await,
+            }
+        })
+        .await
     }
 
     pub async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
-        match self.inner.as_ref() {
-            ProfileServiceInner::Firestore(store) => store.get(user_id).await,
-            ProfileServiceInner::Mock(store) => store.get(user_id),
-        }
+        let operation = ProfileOperation::Get;
+        Self::with_deadline(operation, async {
+            match self.inner.as_ref() {
+                ProfileServiceInner::Firestore(store) => store.get(user_id).await,
+                ProfileServiceInner::Mock(store) => store.get(user_id).await,
+            }
+        })
+        .await
     }
 
     pub async fn update(
@@ -279,16 +292,36 @@ impl ProfileService {
         user_id: &str,
         params: UpdateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
-        match self.inner.as_ref() {
-            ProfileServiceInner::Firestore(store) => store.update(user_id, params).await,
-            ProfileServiceInner::Mock(store) => store.update(user_id, params),
-        }
+        let operation = ProfileOperation::Update;
+        Self::with_deadline(operation, async {
+            match self.inner.as_ref() {
+                ProfileServiceInner::Firestore(store) => store.update(user_id, params).await,
+                ProfileServiceInner::Mock(store) => store.update(user_id, params).await,
+            }
+        })
+        .await
     }
 
     pub async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
-        match self.inner.as_ref() {
-            ProfileServiceInner::Firestore(store) => store.delete(user_id).await,
-            ProfileServiceInner::Mock(store) => store.delete(user_id),
+        let operation = ProfileOperation::Delete;
+        Self::with_deadline(operation, async {
+            match self.inner.as_ref() {
+                ProfileServiceInner::Firestore(store) => store.delete(user_id).await,
+                ProfileServiceInner::Mock(store) => store.delete(user_id).await,
+            }
+        })
+        .await
+    }
+
+    async fn with_deadline<T>(
+        operation: ProfileOperation,
+        future: impl Future<Output = Result<T, ProfileServiceError>>,
+    ) -> Result<T, ProfileServiceError> {
+        match tokio::time::timeout(PROFILE_OPERATION_TIMEOUT, future).await {
+            Ok(result) => result,
+            Err(error) => Err(ProfileServiceError::Unavailable(ProfileBackendError::new(
+                operation, error,
+            ))),
         }
     }
 }
@@ -297,6 +330,12 @@ impl MockProfileService {
     #[must_use]
     pub fn with_error(mut self, error: ProfileServiceError) -> Self {
         self.error = Some(error);
+        self
+    }
+
+    #[must_use]
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
         self
     }
 
@@ -345,12 +384,13 @@ impl MockProfileService {
             .cloned()
     }
 
-    fn create(
+    async fn create(
         &self,
         user_id: &str,
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         self.record(ProfileOperation::Create);
+        self.delay_if_configured().await;
         self.fail_if_configured()?;
         let now = *self.now.lock().expect("mock clock lock should succeed");
         let mut state = self
@@ -366,8 +406,9 @@ impl MockProfileService {
         Ok(profile)
     }
 
-    fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
+    async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         self.record(ProfileOperation::Get);
+        self.delay_if_configured().await;
         self.fail_if_configured()?;
         let profile = self
             .state
@@ -381,12 +422,13 @@ impl MockProfileService {
         Ok(profile)
     }
 
-    fn update(
+    async fn update(
         &self,
         user_id: &str,
         params: UpdateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
         self.record(ProfileOperation::Update);
+        self.delay_if_configured().await;
         self.fail_if_configured()?;
         let now = *self.now.lock().expect("mock clock lock should succeed");
         let mut state = self
@@ -407,18 +449,28 @@ impl MockProfileService {
         Ok(updated)
     }
 
-    fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
+    async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         self.record(ProfileOperation::Delete);
+        self.delay_if_configured().await;
         self.fail_if_configured()?;
         let mut state = self
             .state
             .lock()
             .expect("mock profile state lock should succeed");
-        if state.profiles.remove(user_id).is_none() {
-            return Err(ProfileServiceError::NotFound);
-        }
+        let current = state
+            .profiles
+            .get(user_id)
+            .ok_or(ProfileServiceError::NotFound)?;
+        validate_stored_profile(current, user_id, ProfileOperation::Delete)?;
+        state.profiles.remove(user_id);
         self.committed_writes.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn delay_if_configured(&self) {
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
     }
 
     fn fail_if_configured(&self) -> Result<(), ProfileServiceError> {
@@ -455,7 +507,11 @@ fn create_transaction_result(outcome: TransactionOutcome) -> Result<Profile, Pro
 
 fn update_transaction_result(outcome: TransactionOutcome) -> Result<Profile, ProfileServiceError> {
     match outcome {
-        TransactionOutcome::Profile(profile) | TransactionOutcome::NoChange(profile) => Ok(profile),
+        TransactionOutcome::Profile(profile) => {
+            info!(operation = "profile.update", "profile mutation succeeded");
+            Ok(profile)
+        }
+        TransactionOutcome::NoChange(profile) => Ok(profile),
         TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
         TransactionOutcome::Invalid(error) => Err(error.into()),
         _ => Err(internal_profile_error(ProfileOperation::Update)),
@@ -464,7 +520,10 @@ fn update_transaction_result(outcome: TransactionOutcome) -> Result<Profile, Pro
 
 fn delete_transaction_result(outcome: &TransactionOutcome) -> Result<(), ProfileServiceError> {
     match outcome {
-        TransactionOutcome::Deleted => Ok(()),
+        TransactionOutcome::Deleted => {
+            info!(operation = "profile.delete", "profile mutation succeeded");
+            Ok(())
+        }
         TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
         TransactionOutcome::Invalid(error) => Err(error.clone().into()),
         _ => Err(internal_profile_error(ProfileOperation::Delete)),
@@ -812,7 +871,12 @@ pub(crate) fn transaction_firestore_error(error: FirestoreError) -> BackoffError
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error as _, sync::Arc};
+    use std::{
+        error::Error as _,
+        io::{self, Write},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use firestore::{
         FirestoreDb,
@@ -822,12 +886,30 @@ mod tests {
     use time::macros::datetime;
 
     use super::{
-        CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
-        ProfileServiceError, TransactionOutcome, UpdateProfileParams, create_transaction_result,
-        decode_stored_profile, decode_transaction_profile, delete_transaction_result,
-        map_firestore_error, profile_document_id, transaction_firestore_error,
-        update_transaction_result, validate_stored_profile,
+        CreateProfileParams, MockProfileService, PROFILE_OPERATION_TIMEOUT, Profile,
+        ProfileBackendError, ProfileOperation, ProfileService, ProfileServiceError,
+        TransactionOutcome, UpdateProfileParams, create_transaction_result, decode_stored_profile,
+        decode_transaction_profile, delete_transaction_result, map_firestore_error,
+        profile_document_id, transaction_firestore_error, update_transaction_result,
+        validate_stored_profile,
     };
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log lock should succeed")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn create_params(first_name: &str) -> CreateProfileParams {
         CreateProfileParams {
@@ -1140,6 +1222,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn committed_update_and_delete_emit_exact_success_events() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(Arc::clone(&writer_logs)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let profile = Profile {
+            id: "user-123".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-07-30T12:00:00.000Z".to_owned(),
+            updated_at: "2026-07-30T12:00:00.000Z".to_owned(),
+        };
+
+        update_transaction_result(TransactionOutcome::Profile(profile.clone()))
+            .expect("committed update");
+        update_transaction_result(TransactionOutcome::NoChange(profile)).expect("no-op update");
+        delete_transaction_result(&TransactionOutcome::Deleted).expect("committed delete");
+        delete_transaction_result(&TransactionOutcome::NotFound).expect_err("missing delete");
+
+        let logs = String::from_utf8(logs.lock().expect("log lock should succeed").clone())
+            .expect("logs should be UTF-8");
+        assert_eq!(logs.matches("profile.update").count(), 1);
+        assert_eq!(logs.matches("profile.delete").count(), 1);
+        assert_eq!(logs.matches("profile mutation succeeded").count(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn every_profile_operation_has_one_exact_deadline() {
+        for operation in [
+            ProfileOperation::Create,
+            ProfileOperation::Get,
+            ProfileOperation::Update,
+            ProfileOperation::Delete,
+        ] {
+            let mock = MockProfileService::default()
+                .with_delay(PROFILE_OPERATION_TIMEOUT + Duration::from_secs(1));
+            let service = ProfileService::mock(mock.clone());
+            let started = tokio::time::Instant::now();
+            let result = match operation {
+                ProfileOperation::Create => service
+                    .create("user-123", create_params("Ada"))
+                    .await
+                    .map(|_| ()),
+                ProfileOperation::Get => service.get("user-123").await.map(|_| ()),
+                ProfileOperation::Update => service
+                    .update(
+                        "user-123",
+                        UpdateProfileParams {
+                            marketing_opt_in: Some(true),
+                            ..UpdateProfileParams::default()
+                        },
+                    )
+                    .await
+                    .map(|_| ()),
+                ProfileOperation::Delete => service.delete("user-123").await,
+                ProfileOperation::Initialize => unreachable!("not a public profile operation"),
+            };
+
+            let ProfileServiceError::Unavailable(error) =
+                result.expect_err("stalled operation should expire")
+            else {
+                panic!("deadline must map to an unavailable dependency");
+            };
+            assert_eq!(error.operation(), operation);
+            assert!(error.source().is_some());
+            assert_eq!(started.elapsed(), PROFILE_OPERATION_TIMEOUT);
+            assert_eq!(mock.operation_count(operation), 1);
+            assert_eq!(mock.committed_write_count(), 0);
+            assert!(mock.stored_profile("user-123").is_none());
+        }
+    }
+
     #[tokio::test]
     async fn mock_create_is_atomic_under_concurrency() {
         let mock = MockProfileService::default();
@@ -1150,7 +1313,7 @@ mod tests {
             |store: MockProfileService, name: &'static str, barrier: Arc<tokio::sync::Barrier>| {
                 tokio::spawn(async move {
                     barrier.wait().await;
-                    store.create("user-123", create_params(name))
+                    store.create("user-123", create_params(name)).await
                 })
             };
         let first = spawn(left, "Ada", Arc::clone(&barrier));
@@ -1168,11 +1331,12 @@ mod tests {
         assert_eq!(mock.committed_write_count(), 1);
     }
 
-    #[test]
-    fn no_op_update_preserves_timestamp_and_commits_no_write() {
+    #[tokio::test]
+    async fn no_op_update_preserves_timestamp_and_commits_no_write() {
         let mock = MockProfileService::default();
         let created = mock
             .create("user-123", create_params("Ada"))
+            .await
             .expect("create");
         let updated = mock
             .update(
@@ -1182,13 +1346,14 @@ mod tests {
                     ..UpdateProfileParams::default()
                 },
             )
+            .await
             .expect("update");
         assert_eq!(updated, created);
         assert_eq!(mock.committed_write_count(), 1);
     }
 
-    #[test]
-    fn real_update_is_monotonic_and_max_timestamp_fails_without_write() {
+    #[tokio::test]
+    async fn real_update_is_monotonic_and_max_timestamp_fails_without_write() {
         let mock = MockProfileService::default().with_now(datetime!(2025-01-01 0:00 UTC));
         let profile = Profile {
             id: "user-123".to_owned(),
@@ -1210,6 +1375,7 @@ mod tests {
                     ..UpdateProfileParams::default()
                 },
             )
+            .await
             .expect("update");
         assert_eq!(updated.updated_at, "2026-01-01T00:00:00.001Z");
 
@@ -1220,13 +1386,15 @@ mod tests {
         let max_store = MockProfileService::default().with_profile(max.clone());
         let writes = max_store.committed_write_count();
         assert!(matches!(
-            max_store.update(
-                "user-123",
-                UpdateProfileParams {
-                    marketing_opt_in: Some(false),
-                    ..UpdateProfileParams::default()
-                }
-            ),
+            max_store
+                .update(
+                    "user-123",
+                    UpdateProfileParams {
+                        marketing_opt_in: Some(false),
+                        ..UpdateProfileParams::default()
+                    }
+                )
+                .await,
             Err(ProfileServiceError::Backend(_))
         ));
         assert_eq!(max_store.committed_write_count(), writes);

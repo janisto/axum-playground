@@ -337,6 +337,32 @@ async fn stalled_authentication_returns_dependency_unavailable_without_persisten
     assert_eq!(store.committed_write_count(), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn stalled_persistence_returns_dependency_unavailable_without_a_write() {
+    let auth = MockAuthVerifier::test_user();
+    let store = MockProfileService::default().with_delay(Duration::from_secs(31));
+    let response = build_app(state_with(
+        auth.clone(),
+        MockGitHubService::demo(),
+        store.clone(),
+    ))
+    .oneshot(authorized(Method::GET, Body::empty()))
+    .await
+    .expect("request should complete at the persistence deadline");
+
+    assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    assert_problem(
+        response,
+        StatusCode::SERVICE_UNAVAILABLE,
+        ProblemCode::DependencyUnavailable,
+    )
+    .await;
+    assert_eq!(auth.call_count(), 1);
+    assert_eq!(store.operation_count(ProfileOperation::Get), 1);
+    assert_eq!(store.committed_write_count(), 0);
+}
+
 #[tokio::test]
 async fn profile_route_query_negotiation_size_and_auth_order_is_fail_closed() {
     let auth = MockAuthVerifier::test_user();
@@ -751,7 +777,26 @@ async fn profile_persistence_errors_and_timestamp_exhaustion_map_without_leaks_o
     )
     .await;
     assert_eq!(store.committed_write_count(), 0);
-    assert_eq!(store.stored_profile("user-123"), Some(max));
+    assert_eq!(store.stored_profile("user-123"), Some(max.clone()));
+
+    let corrupt = Profile {
+        contact_email: "Ada@EXAMPLE.COM".to_owned(),
+        ..max
+    };
+    let store = MockProfileService::default().with_profile(corrupt.clone());
+    let response = app_with(store.clone())
+        .oneshot(authorized(Method::DELETE, Body::empty()))
+        .await
+        .unwrap();
+    assert_problem(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ProblemCode::InternalError,
+    )
+    .await;
+    assert_eq!(store.operation_count(ProfileOperation::Delete), 1);
+    assert_eq!(store.committed_write_count(), 0);
+    assert_eq!(store.stored_profile("user-123"), Some(corrupt));
 }
 
 #[tokio::test]

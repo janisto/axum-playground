@@ -24,7 +24,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - Cursor-based pagination with RFC 8288 `Link` headers on items, GitHub repositories, activity, and tags
 - OpenAPI 3.1 documentation at `/openapi.json`, including exact JSON/CBOR media types, controlled responses, headers, and Firebase bearer auth, with Swagger UI at `/api-docs`
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, a 30-second authentication-operation deadline, and emulator-mode support
-- Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, and an audit-first one-time migration for the retired profile shape
+- Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, a 30-second persistence-operation deadline, and an audit-first one-time migration for the retired profile shape
 - Anonymous, credential-free GitHub transport with fixed API-version headers, manual same-origin redirects, strict projections, bounded bodies, and a single ten-second operation deadline
 - Health check endpoint at `/health`
 
@@ -50,7 +50,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 Errors use the RFC 9457 Problem Details data model and honor content negotiation:
 
 - `application/problem+json` when JSON is requested or selected by default
-- `application/cbor` when CBOR is explicitly preferred
+- `application/cbor` when CBOR is selected by quality and specificity, including wildcard fallback after a more-specific JSON exclusion
 
 `application/problem+cbor` is not a registered media type. The registered `application/concise-problem-details+cbor` type defines a different compact model and is not implemented here.
 
@@ -73,12 +73,12 @@ Errors use the RFC 9457 Problem Details data model and honor content negotiation
 #### Content Negotiation
 
 - JSON is the default and wins equal-quality ties.
-- CBOR is selected only by an explicit positive-quality `application/cbor` media range; wildcards do not silently opt clients into binary responses.
+- CBOR is selected when it outranks JSON. A wildcard alone ties the representations and JSON wins, but a wildcard can select CBOR when a more-specific range excludes JSON, such as `application/json;q=0, application/*;q=1`.
 - Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
 - Request bodies must declare exactly one `Content-Type` value of `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, a CBOR body must contain exactly one data item, and `Content-Encoding` is limited to absent or a single `identity` value.
-- Problems use `application/problem+json` by default and `application/cbor` when CBOR is explicitly preferred. Error negotiation is best effort so an existing error is not replaced by a second 406.
+- Problems use `application/problem+json` by default and `application/cbor` under the same quality and specificity rules. Error negotiation is best effort so an existing error is not replaced by a second 406.
 - Bodyless 204 responses ignore `Accept`.
-- `/health` follows the same JSON-default and explicit CBOR negotiation contract
+- `/health` follows the same JSON-default representation negotiation contract
 
 See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949), [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457), and the [IANA media type registry](https://www.iana.org/assignments/media-types/media-types.xhtml) for the underlying contracts. Deterministic CBOR is intentionally not required because these payloads are transport representations, not signature or hash inputs.
 
@@ -403,7 +403,7 @@ Production runtime expectations:
 - Cloud Run terminates TLS before forwarding HTTP traffic to the container
 - Production credentials should come from the attached service identity rather than a local key file
 - Configure any required CORS policy at the environment boundary; the application does not enable wildcard CORS
-- Put Cloud Run or another front proxy in front of the Axum server for connection and platform deadlines; the application owns a 30-second authentication-operation deadline and the contract's ten-second GitHub operation deadline rather than a global request timeout
+- Put Cloud Run or another front proxy in front of the Axum server for connection and platform deadlines; the application owns 30-second authentication- and persistence-operation deadlines and the contract's ten-second GitHub operation deadline rather than a global request timeout
 
 ## QA Surface
 

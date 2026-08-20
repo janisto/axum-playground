@@ -124,20 +124,20 @@ fn is_github_path(path: &str) -> bool {
         return false;
     };
     let segments = path.split('/').collect::<Vec<_>>();
-    matches!(
-        segments.as_slice(),
-        ["v1", "github", "owners", _]
-            | ["v1", "github", "owners", _, "repos"]
-            | ["v1", "github", "repos", _, _]
-            | [
-                "v1",
-                "github",
-                "repos",
-                _,
-                _,
-                "activity" | "languages" | "tags"
-            ]
-    )
+    match segments.as_slice() {
+        ["v1", "github", "owners", owner] => !owner.is_empty(),
+        ["v1", "github", "owners", _, "repos"]
+        | [
+            "v1",
+            "github",
+            "repos",
+            _,
+            _,
+            "activity" | "languages" | "tags",
+        ] => true,
+        ["v1", "github", "repos", _, repository] => !repository.is_empty(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -179,12 +179,26 @@ mod tests {
             "/missing",
             "/v1/github",
             "/v1/github/owners",
+            "/v1/github/owners/",
             "/v1/github/owners/octocat/extra",
             "/v1/github/repos/octocat",
+            "/v1/github/repos/octocat/",
             "/v1/github/repos/octocat/hello-world/extra",
         ] {
             assert!(!is_github_path(path), "unexpected GitHub path: {path}");
             assert_eq!(portable_allow(path), None);
+        }
+
+        for path in [
+            "/v1/github/owners//repos",
+            "/v1/github/repos//hello-world",
+            "/v1/github/repos/octocat//tags",
+        ] {
+            assert!(is_github_path(path), "expected registered shape: {path}");
+            assert_eq!(
+                portable_allow(path),
+                Some(header::HeaderValue::from_static("GET"))
+            );
         }
     }
 }
