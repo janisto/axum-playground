@@ -436,6 +436,63 @@ async fn rejected_head_requests_preserve_headers_without_sending_a_body() {
             "{path}"
         );
     }
+
+    for path in [
+        "/missing",
+        "/health/",
+        "//v1/github/owners/octocat",
+        "///v1/github/repos/octocat/hello-world",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(!response.headers().contains_key(header::ALLOW), "{path}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json",
+            "{path}"
+        );
+        assert_common_headers(&response, true);
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body should be readable")
+                .is_empty(),
+            "{path}"
+        );
+    }
+
+    let response = build_app_with_routes(
+        test_state(),
+        Router::new().route("/__panic", get(panic_handler)),
+    )
+    .oneshot(
+        Request::builder()
+            .method(Method::HEAD)
+            .uri("/__panic")
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await
+    .expect("request should complete");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_common_headers(&response, true);
+    assert!(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable")
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

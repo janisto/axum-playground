@@ -1,6 +1,6 @@
 mod common;
 
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{
     body::{Body, Bytes, to_bytes},
@@ -309,6 +309,32 @@ async fn profile_distinguishes_invalid_identity_from_auth_dependency_failure() {
         assert_eq!(auth.call_count(), 1);
         assert_eq!(store.operation_count(ProfileOperation::Get), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_authentication_returns_dependency_unavailable_without_persistence() {
+    let auth = MockAuthVerifier::test_user().with_delay(Duration::from_secs(31));
+    let store = MockProfileService::default();
+    let response = build_app(state_with(
+        auth.clone(),
+        MockGitHubService::demo(),
+        store.clone(),
+    ))
+    .oneshot(authorized(Method::GET, Body::empty()))
+    .await
+    .expect("request should complete at the authentication deadline");
+
+    assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+    assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    assert_problem(
+        response,
+        StatusCode::SERVICE_UNAVAILABLE,
+        ProblemCode::DependencyUnavailable,
+    )
+    .await;
+    assert_eq!(auth.call_count(), 1);
+    assert_eq!(store.operation_count(ProfileOperation::Get), 0);
+    assert_eq!(store.committed_write_count(), 0);
 }
 
 #[tokio::test]

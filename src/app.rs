@@ -36,6 +36,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
         .layer(
             ServiceBuilder::new()
                 .layer(ObservabilityLayer::new(observability_config()))
+                .layer(from_fn(empty_head_response_body))
                 .layer(from_fn(security_headers_middleware))
                 .layer(from_fn(panic_recovery_middleware))
                 .layer(from_fn(portable_head_rejection_middleware))
@@ -44,11 +45,20 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
         .with_state(state)
 }
 
+async fn empty_head_response_body(request: Request, next: Next) -> Response {
+    let is_head = request.method() == Method::HEAD;
+    let response = next.run(request).await;
+    if !is_head {
+        return response;
+    }
+
+    let (parts, _) = response.into_parts();
+    Response::from_parts(parts, Body::empty())
+}
+
 async fn portable_head_rejection_middleware(request: Request, next: Next) -> Response {
     if request.method() == Method::HEAD && portable_allow(request.uri().path()).is_some() {
-        let mut response = method_not_allowed_handler(request).await;
-        *response.body_mut() = Body::empty();
-        return response;
+        return method_not_allowed_handler(request).await;
     }
     next.run(request).await
 }

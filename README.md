@@ -23,7 +23,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
 - Cursor-based pagination with RFC 8288 `Link` headers on items, GitHub repositories, activity, and tags
 - OpenAPI 3.1 documentation at `/openapi.json`, including exact JSON/CBOR media types, controlled responses, headers, and Firebase bearer auth, with Swagger UI at `/api-docs`
-- Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
+- Firebase Authentication with production JWKS verification, disabled and revoked user checks, a 30-second authentication-operation deadline, and emulator-mode support
 - Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, and an audit-first one-time migration for the retired profile shape
 - Anonymous, credential-free GitHub transport with fixed API-version headers, manual same-origin redirects, strict projections, bounded bodies, and a single ten-second operation deadline
 - Health check endpoint at `/health`
@@ -403,7 +403,7 @@ Production runtime expectations:
 - Cloud Run terminates TLS before forwarding HTTP traffic to the container
 - Production credentials should come from the attached service identity rather than a local key file
 - Configure any required CORS policy at the environment boundary; the application does not enable wildcard CORS
-- Put Cloud Run or another front proxy in front of the Axum server for connection and platform deadlines; the application adds only the contract's ten-second GitHub operation deadline
+- Put Cloud Run or another front proxy in front of the Axum server for connection and platform deadlines; the application owns a 30-second authentication-operation deadline and the contract's ten-second GitHub operation deadline rather than a global request timeout
 
 ## QA Surface
 

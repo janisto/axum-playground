@@ -33,6 +33,7 @@ const IDENTITY_TOOLKIT_SCOPE: &str = "https://www.googleapis.com/auth/identityto
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
 const JWKS_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+const AUTH_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_KEY_ID_BYTES: usize = 128;
 const JWT_LEEWAY_SECS: u64 = 60;
 
@@ -130,6 +131,7 @@ struct EmulatorAuthVerifier {
 pub struct MockAuthVerifier {
     user: FirebaseUser,
     error: Option<AuthError>,
+    delay: Option<Duration>,
     calls: Arc<AtomicUsize>,
 }
 
@@ -234,6 +236,7 @@ impl AuthVerifier {
 
         let client = Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
+            .timeout(AUTH_OPERATION_TIMEOUT)
             .build()
             .map_err(|_| StartupError::AuthHttpClientInitialization)?;
 
@@ -260,10 +263,16 @@ impl AuthVerifier {
     }
 
     pub async fn verify(&self, token: &str) -> Result<FirebaseUser, AuthError> {
-        match self.inner.as_ref() {
-            AuthVerifierInner::Production(verifier) => verifier.verify(token).await,
-            AuthVerifierInner::Emulator(verifier) => verifier.verify(token).await,
-            AuthVerifierInner::Mock(verifier) => verifier.verify(token).await,
+        let verification = async {
+            match self.inner.as_ref() {
+                AuthVerifierInner::Production(verifier) => verifier.verify(token).await,
+                AuthVerifierInner::Emulator(verifier) => verifier.verify(token).await,
+                AuthVerifierInner::Mock(verifier) => verifier.verify(token).await,
+            }
+        };
+        match tokio::time::timeout(AUTH_OPERATION_TIMEOUT, verification).await {
+            Ok(result) => result,
+            Err(_) => Err(AuthError::ServiceUnavailable),
         }
     }
 }
@@ -274,6 +283,7 @@ impl MockAuthVerifier {
         Self {
             user,
             error: None,
+            delay: None,
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -290,12 +300,21 @@ impl MockAuthVerifier {
     }
 
     #[must_use]
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    #[must_use]
     pub fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 
     async fn verify(&self, _token: &str) -> Result<FirebaseUser, AuthError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         self.error
             .clone()
             .map_or_else(|| Ok(self.user.clone()), Err)
@@ -851,10 +870,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaimMetadata,
-        FirebaseClaims, FirebaseUser, GoogleJwk, GoogleJwksClient, GoogleJwksResponse,
-        IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, JwksState,
-        MockGoogleJwksTransport, auth_error_is_dependency_failure, cache_ttl,
+        AUTH_OPERATION_TIMEOUT, AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier,
+        FirebaseClaimMetadata, FirebaseClaims, FirebaseUser, GoogleJwk, GoogleJwksClient,
+        GoogleJwksResponse, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, JwksState,
+        MockAuthVerifier, MockGoogleJwksTransport, auth_error_is_dependency_failure, cache_ttl,
         categorize_auth_error, decode_firebase_claims, expected_issuer, extract_bearer_token,
         firebase_validation, map_jwt_error, require_successful_response, rsa_key_id,
         token_is_revoked, validate_common_claims_at,
@@ -922,6 +941,21 @@ mod tests {
             extract_bearer_token("Bearer abc=def"),
             Err(AuthError::InvalidAuthorization)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_operation_timeout_is_exact_and_controlled() {
+        let mock = MockAuthVerifier::test_user()
+            .with_delay(AUTH_OPERATION_TIMEOUT + Duration::from_secs(1));
+        let verifier = AuthVerifier::mock(mock.clone());
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(
+            verifier.verify("token").await,
+            Err(AuthError::ServiceUnavailable)
+        );
+        assert_eq!(started.elapsed(), AUTH_OPERATION_TIMEOUT);
+        assert_eq!(mock.call_count(), 1);
     }
 
     #[test]
