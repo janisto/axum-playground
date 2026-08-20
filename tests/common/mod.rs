@@ -1,70 +1,65 @@
 #![allow(dead_code)]
 
-use axum::{
-    body::{Body, to_bytes},
-    http::Response,
-};
 use std::sync::Arc;
 
-use axum_playground::{AppConfig, AppState, AuthVerifier, GitHubService, ProfileService};
+use axum::{
+    body::{Body, Bytes, to_bytes},
+    http::Response,
+};
+use axum_playground::{
+    AppConfig, AppEnvironment, AppState, AuthVerifier, GitHubService, MockAuthVerifier,
+    MockGitHubService, MockProfileService, ProfileService,
+};
 use serde::de::DeserializeOwned;
 
-const TEST_RESPONSE_BODY_LIMIT: usize = 1024 * 1024;
+const TEST_RESPONSE_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+pub(crate) async fn body_bytes(response: Response<Body>) -> Bytes {
+    to_bytes(response.into_body(), TEST_RESPONSE_BODY_LIMIT)
+        .await
+        .expect("response body should be readable")
+}
 
 pub(crate) async fn read_json_body<T: DeserializeOwned>(response: Response<Body>) -> T {
-    let body = to_bytes(response.into_body(), TEST_RESPONSE_BODY_LIMIT)
-        .await
-        .expect("body should be readable");
-    serde_json::from_slice(&body).expect("body should deserialize from JSON")
+    serde_json::from_slice(&body_bytes(response).await).expect("response should be valid JSON")
 }
 
 pub(crate) async fn read_cbor_body<T: DeserializeOwned>(response: Response<Body>) -> T {
-    let body = to_bytes(response.into_body(), TEST_RESPONSE_BODY_LIMIT)
-        .await
-        .expect("body should be readable");
-    ciborium::from_reader(body.as_ref()).expect("body should deserialize from CBOR")
+    ciborium::from_reader(body_bytes(response).await.as_ref())
+        .expect("response should be valid CBOR")
 }
 
 pub(crate) async fn read_text_body(response: Response<Body>) -> String {
-    let body = to_bytes(response.into_body(), TEST_RESPONSE_BODY_LIMIT)
-        .await
-        .expect("body should be readable");
-    String::from_utf8(body.to_vec()).expect("body should be valid UTF-8")
+    String::from_utf8(body_bytes(response).await.to_vec())
+        .expect("response body should be valid UTF-8")
 }
 
 pub(crate) fn test_state() -> Arc<AppState> {
-    test_state_with_github_service(GitHubService::mock(
-        axum_playground::MockGitHubService::demo(),
-    ))
+    state_with(
+        MockAuthVerifier::test_user(),
+        MockGitHubService::demo(),
+        MockProfileService::default(),
+    )
 }
 
-pub(crate) fn test_state_with_github_service(github_service: GitHubService) -> Arc<AppState> {
-    Arc::new(AppState::with_services(
-        base_test_config(),
-        github_service,
-        AuthVerifier::mock(axum_playground::MockAuthVerifier::test_user()),
-        ProfileService::mock(axum_playground::MockProfileService::default()),
-    ))
-}
-
-pub(crate) fn test_state_with_auth_and_profile(
-    auth_verifier: AuthVerifier,
-    profile_service: ProfileService,
+pub(crate) fn state_with(
+    auth: MockAuthVerifier,
+    github: MockGitHubService,
+    profile: MockProfileService,
 ) -> Arc<AppState> {
     Arc::new(AppState::with_services(
         base_test_config(),
-        GitHubService::mock(axum_playground::MockGitHubService::demo()),
-        auth_verifier,
-        profile_service,
+        GitHubService::mock(github),
+        AuthVerifier::mock(auth),
+        ProfileService::mock(profile),
     ))
 }
 
-fn base_test_config() -> AppConfig {
+pub(crate) fn base_test_config() -> AppConfig {
     AppConfig {
         port: 8080,
         firebase_project_id: "demo-test-project".to_owned(),
-        app_environment: axum_playground::AppEnvironment::Test,
-        github_token: None,
+        app_environment: AppEnvironment::Test,
         google_application_credentials: None,
         firebase_auth_emulator_host: None,
         firestore_emulator_host: None,
@@ -73,4 +68,48 @@ fn base_test_config() -> AppConfig {
         gcloud_project: None,
         project_id: None,
     }
+}
+
+pub(crate) fn assert_common_headers(response: &Response<Body>, vary: bool) {
+    let headers = response.headers();
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers
+            .get("x-frame-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    assert_eq!(
+        headers
+            .get("referrer-policy")
+            .and_then(|value| value.to_str().ok()),
+        Some("strict-origin-when-cross-origin")
+    );
+    assert!(headers.get("x-request-id").is_some());
+    if vary {
+        assert!(
+            headers
+                .get_all("vary")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|value| value.eq_ignore_ascii_case("Accept"))
+        );
+    }
+}
+
+pub(crate) fn bearer_request(
+    builder: axum::http::request::Builder,
+) -> axum::http::request::Builder {
+    builder.header("authorization", "Bearer test-token")
 }

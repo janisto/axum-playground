@@ -1,9 +1,9 @@
 use std::{backtrace::Backtrace, panic::AssertUnwindSafe};
 
-use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use axum::{extract::Request, middleware::Next, response::Response};
 use futures_util::FutureExt;
 
-use crate::problem::problem_response;
+use crate::problem::{ProblemCode, problem_response};
 
 pub async fn panic_recovery_middleware(request: Request, next: Next) -> Response {
     let request_headers = request.headers().clone();
@@ -14,10 +14,6 @@ pub async fn panic_recovery_middleware(request: Request, next: Next) -> Response
         let backtrace = Backtrace::force_capture().to_string();
         tracing::error!(backtrace, "request panicked");
 
-        problem_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal server error",
-            &request_headers,
-        )
+        problem_response(ProblemCode::InternalError, &request_headers)
     }
 }

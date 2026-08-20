@@ -6,4 +6,9 @@ exclude_re = [
     'src/shutdown\.rs:.*: replace shutdown_signal with \(\)$',
     # The real Firestore delete side effect is covered by the conditional emulator CRUD test.
     'src/services/profile\.rs:.*: replace FirestoreProfileStore::delete -> Result<\(\), ProfileServiceError> with Ok\(\(\)\)$',
+    # Firestore collection enumeration is the native I/O adapter. The conditional emulator
+    # migration test proves nonempty audit/apply/idempotency behavior; the deterministic store
+    # tests cover the migration engine and all failure semantics without a live dependency.
+    'src/profile_migration\.rs:.*: replace .*FirestoreMigrationStore.*::load -> .* with Ok\(vec!\[\]\)$',
+    'src/profile_migration\.rs:.*: replace load_classified -> .* with Ok\(vec!\[\]\)$',
 ]

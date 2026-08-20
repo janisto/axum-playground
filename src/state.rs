@@ -24,7 +24,7 @@ impl fmt::Debug for AppState {
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self, StartupError> {
         let profile_service = ProfileService::firestore(&config)?;
-        let github_service = GitHubService::http(config.github_token.clone());
+        let github_service = GitHubService::http();
         let auth_verifier = AuthVerifier::from_config(&config)?;
 
         Ok(Self::with_services(
@@ -71,7 +71,6 @@ mod tests {
             port: 8080,
             firebase_project_id: "project".to_owned(),
             app_environment: AppEnvironment::Development,
-            github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
             firestore_emulator_host: Some("firestore.example.com:8080".to_owned()),
@@ -97,7 +96,6 @@ mod tests {
                 port: 8080,
                 firebase_project_id: "project".to_owned(),
                 app_environment: AppEnvironment::Test,
-                github_token: Some("secret-token".to_owned()),
                 google_application_credentials: Some("/secret/credentials.json".to_owned()),
                 firebase_auth_emulator_host: None,
                 firestore_emulator_host: None,
@@ -113,7 +111,6 @@ mod tests {
 
         let output = format!("{state:?}");
         assert!(output.starts_with("AppState { config: AppConfig"));
-        assert!(!output.contains("secret-token"));
         assert!(!output.contains("/secret/credentials.json"));
         assert!(!output.contains("github_service"));
         assert!(!output.contains("profile_service"));

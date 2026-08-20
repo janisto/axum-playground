@@ -2,7 +2,10 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -11,14 +14,21 @@ use firestore::{
 };
 use gcloud_sdk::{ExternalJwtFunctionSource, Token, TokenSourceType};
 use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, macros::datetime};
 use tokio::sync::OnceCell;
-use tracing::{info, warn};
+use tracing::info;
 use utoipa::ToSchema;
 
-use crate::{config::AppConfig, error::StartupError};
+use crate::{
+    config::AppConfig,
+    error::StartupError,
+    validation::{
+        canonical_clock_timestamp, next_timestamp, normalize_contact_email, normalize_phone_number,
+        normalize_timestamp, valid_bounded_name, valid_opaque_id,
+    },
+};
 
-const PROFILES_COLLECTION: &str = "profiles";
+pub(crate) const PROFILES_COLLECTION: &str = "profiles";
 const FIRESTORE_API_URL: &str = "https://firestore.googleapis.com";
 const EMULATOR_BEARER_TOKEN: &str = "owner";
 const EMULATOR_TOKEN_EXPIRY: &str = "9999-12-31T23:59:59Z";
@@ -41,45 +51,95 @@ struct FirestoreProfileStore {
     db: Arc<OnceCell<FirestoreDb>>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MockProfileService {
-    profiles: Arc<Mutex<BTreeMap<String, Profile>>>,
+    state: Arc<Mutex<MockProfileState>>,
+    committed_writes: Arc<AtomicUsize>,
+    operations: Arc<Mutex<Vec<ProfileOperation>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
     error: Option<ProfileServiceError>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct MockProfileState {
+    profiles: BTreeMap<String, Profile>,
+}
+
+impl Default for MockProfileService {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(MockProfileState::default())),
+            committed_writes: Arc::new(AtomicUsize::new(0)),
+            operations: Arc::new(Mutex::new(Vec::new())),
+            now: Arc::new(Mutex::new(datetime!(2026-07-30 12:00 UTC))),
+            error: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
-    pub firstname: String,
-    pub lastname: String,
-    pub email: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub contact_email: String,
     pub phone_number: String,
-    pub marketing: bool,
-    pub terms: bool,
+    pub marketing_opt_in: bool,
+    pub terms_accepted: bool,
     #[schema(format = DateTime)]
     pub created_at: String,
     #[schema(format = DateTime)]
     pub updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredProfile {
+    id: String,
+    first_name: String,
+    last_name: String,
+    contact_email: String,
+    phone_number: String,
+    marketing_opt_in: bool,
+    terms_accepted: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<StoredProfile> for Profile {
+    fn from(value: StoredProfile) -> Self {
+        Self {
+            id: value.id,
+            first_name: value.first_name,
+            last_name: value.last_name,
+            contact_email: value.contact_email,
+            phone_number: value.phone_number,
+            marketing_opt_in: value.marketing_opt_in,
+            terms_accepted: value.terms_accepted,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateProfileParams {
-    pub firstname: String,
-    pub lastname: String,
-    pub email: String,
+    pub first_name: String,
+    pub last_name: String,
+    pub contact_email: String,
     pub phone_number: String,
-    pub marketing: bool,
-    pub terms: bool,
+    pub marketing_opt_in: bool,
+    pub terms_accepted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UpdateProfileParams {
-    pub firstname: Option<String>,
-    pub lastname: Option<String>,
-    pub email: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub contact_email: Option<String>,
     pub phone_number: Option<String>,
-    pub marketing: Option<bool>,
+    pub marketing_opt_in: Option<bool>,
 }
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -166,13 +226,10 @@ impl ProfileService {
                 host: host.to_owned(),
             });
         }
-
-        let project_id = config.resolved_google_project_id().to_owned();
-
         Ok(Self {
             inner: Arc::new(ProfileServiceInner::Firestore(Box::new(
                 FirestoreProfileStore {
-                    project_id,
+                    project_id: config.resolved_google_project_id().to_owned(),
                     emulator_host: config.firestore_emulator_host.clone(),
                     db: Arc::new(OnceCell::new()),
                 },
@@ -194,14 +251,14 @@ impl ProfileService {
     ) -> Result<Profile, ProfileServiceError> {
         match self.inner.as_ref() {
             ProfileServiceInner::Firestore(store) => store.create(user_id, params).await,
-            ProfileServiceInner::Mock(store) => store.create(user_id, params).await,
+            ProfileServiceInner::Mock(store) => store.create(user_id, params),
         }
     }
 
     pub async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         match self.inner.as_ref() {
             ProfileServiceInner::Firestore(store) => store.get(user_id).await,
-            ProfileServiceInner::Mock(store) => store.get(user_id).await,
+            ProfileServiceInner::Mock(store) => store.get(user_id),
         }
     }
 
@@ -212,14 +269,14 @@ impl ProfileService {
     ) -> Result<Profile, ProfileServiceError> {
         match self.inner.as_ref() {
             ProfileServiceInner::Firestore(store) => store.update(user_id, params).await,
-            ProfileServiceInner::Mock(store) => store.update(user_id, params).await,
+            ProfileServiceInner::Mock(store) => store.update(user_id, params),
         }
     }
 
     pub async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         match self.inner.as_ref() {
             ProfileServiceInner::Firestore(store) => store.delete(user_id).await,
-            ProfileServiceInner::Mock(store) => store.delete(user_id).await,
+            ProfileServiceInner::Mock(store) => store.delete(user_id),
         }
     }
 }
@@ -233,85 +290,168 @@ impl MockProfileService {
 
     #[must_use]
     pub fn with_profile(self, profile: Profile) -> Self {
-        self.profiles
+        self.state
             .lock()
-            .expect("mock profile map lock should succeed")
+            .expect("mock profile state lock should succeed")
+            .profiles
             .insert(profile.id.clone(), profile);
         self
     }
 
-    async fn create(
+    #[must_use]
+    pub fn with_now(self, now: OffsetDateTime) -> Self {
+        *self.now.lock().expect("mock clock lock should succeed") = now;
+        self
+    }
+
+    pub fn set_now(&self, now: OffsetDateTime) {
+        *self.now.lock().expect("mock clock lock should succeed") = now;
+    }
+
+    #[must_use]
+    pub fn committed_write_count(&self) -> usize {
+        self.committed_writes.load(Ordering::SeqCst)
+    }
+
+    #[must_use]
+    pub fn operation_count(&self, operation: ProfileOperation) -> usize {
+        self.operations
+            .lock()
+            .expect("mock profile operation lock should succeed")
+            .iter()
+            .filter(|value| **value == operation)
+            .count()
+    }
+
+    #[must_use]
+    pub fn stored_profile(&self, user_id: &str) -> Option<Profile> {
+        self.state
+            .lock()
+            .expect("mock profile state lock should succeed")
+            .profiles
+            .get(user_id)
+            .cloned()
+    }
+
+    fn create(
         &self,
         user_id: &str,
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
-        if let Some(error) = &self.error {
-            return Err(error.clone());
-        }
-
-        let mut profiles = self
-            .profiles
+        self.record(ProfileOperation::Create);
+        self.fail_if_configured()?;
+        let now = *self.now.lock().expect("mock clock lock should succeed");
+        let mut state = self
+            .state
             .lock()
-            .expect("mock profile map lock should succeed");
-        if profiles.contains_key(user_id) {
+            .expect("mock profile state lock should succeed");
+        if state.profiles.contains_key(user_id) {
             return Err(ProfileServiceError::AlreadyExists);
         }
-
-        let profile = build_profile(user_id, params);
-        profiles.insert(user_id.to_owned(), profile.clone());
+        let profile = build_profile(user_id, params, now)?;
+        state.profiles.insert(user_id.to_owned(), profile.clone());
+        self.committed_writes.fetch_add(1, Ordering::SeqCst);
         Ok(profile)
     }
 
-    async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
-        if let Some(error) = &self.error {
-            return Err(error.clone());
-        }
-
-        self.profiles
+    fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
+        self.record(ProfileOperation::Get);
+        self.fail_if_configured()?;
+        let profile = self
+            .state
             .lock()
-            .expect("mock profile map lock should succeed")
+            .expect("mock profile state lock should succeed")
+            .profiles
             .get(user_id)
             .cloned()
-            .ok_or(ProfileServiceError::NotFound)
+            .ok_or(ProfileServiceError::NotFound)?;
+        validate_stored_profile(&profile, user_id, ProfileOperation::Get)?;
+        Ok(profile)
     }
 
-    async fn update(
+    fn update(
         &self,
         user_id: &str,
         params: UpdateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
-        if let Some(error) = &self.error {
-            return Err(error.clone());
-        }
-
-        let mut profiles = self
-            .profiles
+        self.record(ProfileOperation::Update);
+        self.fail_if_configured()?;
+        let now = *self.now.lock().expect("mock clock lock should succeed");
+        let mut state = self
+            .state
             .lock()
-            .expect("mock profile map lock should succeed");
-        let profile = profiles
-            .get_mut(user_id)
+            .expect("mock profile state lock should succeed");
+        let current = state
+            .profiles
+            .get(user_id)
+            .cloned()
             .ok_or(ProfileServiceError::NotFound)?;
-
-        apply_update(profile, params);
-        Ok(profile.clone())
+        validate_stored_profile(&current, user_id, ProfileOperation::Update)?;
+        let Some(updated) = updated_profile(&current, params, now)? else {
+            return Ok(current);
+        };
+        state.profiles.insert(user_id.to_owned(), updated.clone());
+        self.committed_writes.fetch_add(1, Ordering::SeqCst);
+        Ok(updated)
     }
 
-    async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
-        if let Some(error) = &self.error {
-            return Err(error.clone());
-        }
-
-        let removed = self
-            .profiles
+    fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
+        self.record(ProfileOperation::Delete);
+        self.fail_if_configured()?;
+        let mut state = self
+            .state
             .lock()
-            .expect("mock profile map lock should succeed")
-            .remove(user_id);
-
-        if removed.is_some() {
-            Ok(())
-        } else {
-            Err(ProfileServiceError::NotFound)
+            .expect("mock profile state lock should succeed");
+        if state.profiles.remove(user_id).is_none() {
+            return Err(ProfileServiceError::NotFound);
         }
+        self.committed_writes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn fail_if_configured(&self) -> Result<(), ProfileServiceError> {
+        self.error.clone().map_or(Ok(()), Err)
+    }
+
+    fn record(&self, operation: ProfileOperation) {
+        self.operations
+            .lock()
+            .expect("mock profile operation lock should succeed")
+            .push(operation);
+    }
+}
+
+#[derive(Clone, Debug)]
+enum TransactionOutcome {
+    Profile(Profile),
+    Exists,
+    NotFound,
+    NoChange(Profile),
+    TimestampExhausted,
+    Deleted,
+}
+
+fn create_transaction_result(outcome: TransactionOutcome) -> Result<Profile, ProfileServiceError> {
+    match outcome {
+        TransactionOutcome::Profile(profile) => Ok(profile),
+        TransactionOutcome::Exists => Err(ProfileServiceError::AlreadyExists),
+        _ => Err(internal_profile_error(ProfileOperation::Create)),
+    }
+}
+
+fn update_transaction_result(outcome: TransactionOutcome) -> Result<Profile, ProfileServiceError> {
+    match outcome {
+        TransactionOutcome::Profile(profile) | TransactionOutcome::NoChange(profile) => Ok(profile),
+        TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
+        _ => Err(internal_profile_error(ProfileOperation::Update)),
+    }
+}
+
+fn delete_transaction_result(outcome: &TransactionOutcome) -> Result<(), ProfileServiceError> {
+    match outcome {
+        TransactionOutcome::Deleted => Ok(()),
+        TransactionOutcome::NotFound => Err(ProfileServiceError::NotFound),
+        _ => Err(internal_profile_error(ProfileOperation::Delete)),
     }
 }
 
@@ -321,39 +461,47 @@ impl FirestoreProfileStore {
         user_id: &str,
         params: CreateProfileParams,
     ) -> Result<Profile, ProfileServiceError> {
-        let profile = build_profile(user_id, params);
-        let document_id = profile_document_id(user_id);
         let db = self.db().await?;
-
-        match db
-            .fluent()
-            .insert()
-            .into(PROFILES_COLLECTION)
-            .document_id(&document_id)
-            .object(&profile)
-            .execute::<Profile>()
+        let document_id = profile_document_id(user_id);
+        let user_id = user_id.to_owned();
+        let now = OffsetDateTime::now_utc();
+        let profile = build_profile(&user_id, params, now)?;
+        let result = db
+            .run_transaction(|db, transaction| {
+                let document_id = document_id.clone();
+                let profile = profile.clone();
+                Box::pin(async move {
+                    let existing: Option<StoredProfile> = db
+                        .fluent()
+                        .select()
+                        .by_id_in(PROFILES_COLLECTION)
+                        .obj()
+                        .one(&document_id)
+                        .await?;
+                    if existing.is_some() {
+                        return Ok(TransactionOutcome::Exists);
+                    }
+                    db.fluent()
+                        .update()
+                        .in_col(PROFILES_COLLECTION)
+                        .precondition(FirestoreWritePrecondition::Exists(false))
+                        .document_id(&document_id)
+                        .object(&profile)
+                        .add_to_transaction(transaction)?;
+                    Ok(TransactionOutcome::Profile(profile))
+                })
+            })
             .await
-        {
-            Ok(created) => {
-                info!(operation = "profile.create", "profile mutation succeeded");
-                Ok(created)
-            }
-            Err(error) => {
-                let error = map_firestore_error(error, ProfileOperation::Create);
-                warn!(
-                    operation = "profile.create",
-                    reason = profile_error_kind(&error),
-                    "profile mutation failed"
-                );
-                Err(error)
-            }
-        }
+            .map_err(|error| map_firestore_error(error, ProfileOperation::Create))?;
+        let profile = create_transaction_result(result)?;
+        info!(operation = "profile.create", "profile mutation succeeded");
+        Ok(profile)
     }
 
     async fn get(&self, user_id: &str) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
         let document_id = profile_document_id(user_id);
-        let profile: Option<Profile> = db
+        let profile: Option<StoredProfile> = db
             .fluent()
             .select()
             .by_id_in(PROFILES_COLLECTION)
@@ -361,8 +509,9 @@ impl FirestoreProfileStore {
             .one(&document_id)
             .await
             .map_err(|error| map_firestore_error(error, ProfileOperation::Get))?;
-
-        profile.ok_or(ProfileServiceError::NotFound)
+        let profile: Profile = profile.ok_or(ProfileServiceError::NotFound)?.into();
+        validate_stored_profile(&profile, user_id, ProfileOperation::Get)?;
+        Ok(profile)
     }
 
     async fn update(
@@ -372,76 +521,78 @@ impl FirestoreProfileStore {
     ) -> Result<Profile, ProfileServiceError> {
         let db = self.db().await?;
         let document_id = profile_document_id(user_id);
-        let profile: Option<Profile> = db
-            .fluent()
-            .select()
-            .by_id_in(PROFILES_COLLECTION)
-            .obj()
-            .one(&document_id)
+        let user_id = user_id.to_owned();
+        let now = OffsetDateTime::now_utc();
+        let result = db
+            .run_transaction(|db, transaction| {
+                let document_id = document_id.clone();
+                let user_id = user_id.clone();
+                let params = params.clone();
+                Box::pin(async move {
+                    let current: Option<StoredProfile> = db
+                        .fluent()
+                        .select()
+                        .by_id_in(PROFILES_COLLECTION)
+                        .obj()
+                        .one(&document_id)
+                        .await?;
+                    let Some(current) = current.map(Profile::from) else {
+                        return Ok(TransactionOutcome::NotFound);
+                    };
+                    if validate_stored_profile(&current, &user_id, ProfileOperation::Update)
+                        .is_err()
+                    {
+                        return Ok(TransactionOutcome::TimestampExhausted);
+                    }
+                    let updated = match updated_profile(&current, params, now) {
+                        Ok(Some(updated)) => updated,
+                        Ok(None) => return Ok(TransactionOutcome::NoChange(current)),
+                        Err(_) => return Ok(TransactionOutcome::TimestampExhausted),
+                    };
+                    db.fluent()
+                        .update()
+                        .in_col(PROFILES_COLLECTION)
+                        .precondition(FirestoreWritePrecondition::Exists(true))
+                        .document_id(&document_id)
+                        .object(&updated)
+                        .add_to_transaction(transaction)?;
+                    Ok(TransactionOutcome::Profile(updated))
+                })
+            })
             .await
             .map_err(|error| map_firestore_error(error, ProfileOperation::Update))?;
-
-        let Some(mut profile) = profile else {
-            return Err(ProfileServiceError::NotFound);
-        };
-
-        let fields = update_field_mask(&params);
-        apply_update(&mut profile, params);
-
-        match db
-            .fluent()
-            .update()
-            .fields(fields.iter().map(String::as_str))
-            .in_col(PROFILES_COLLECTION)
-            .precondition(FirestoreWritePrecondition::Exists(true))
-            .document_id(&document_id)
-            .object(&profile)
-            .execute::<Profile>()
-            .await
-        {
-            Ok(updated) => {
-                info!(operation = "profile.update", "profile mutation succeeded");
-                Ok(updated)
-            }
-            Err(error) => {
-                let error = map_firestore_error(error, ProfileOperation::Update);
-                warn!(
-                    operation = "profile.update",
-                    reason = profile_error_kind(&error),
-                    "profile mutation failed"
-                );
-                Err(error)
-            }
-        }
+        update_transaction_result(result)
     }
 
     async fn delete(&self, user_id: &str) -> Result<(), ProfileServiceError> {
         let db = self.db().await?;
         let document_id = profile_document_id(user_id);
-
-        match db
-            .fluent()
-            .delete()
-            .from(PROFILES_COLLECTION)
-            .document_id(&document_id)
-            .precondition(FirestoreWritePrecondition::Exists(true))
-            .execute()
+        let result = db
+            .run_transaction(|db, transaction| {
+                let document_id = document_id.clone();
+                Box::pin(async move {
+                    let current: Option<StoredProfile> = db
+                        .fluent()
+                        .select()
+                        .by_id_in(PROFILES_COLLECTION)
+                        .obj()
+                        .one(&document_id)
+                        .await?;
+                    if current.is_none() {
+                        return Ok(TransactionOutcome::NotFound);
+                    }
+                    db.fluent()
+                        .delete()
+                        .from(PROFILES_COLLECTION)
+                        .document_id(&document_id)
+                        .precondition(FirestoreWritePrecondition::Exists(true))
+                        .add_to_transaction(transaction)?;
+                    Ok(TransactionOutcome::Deleted)
+                })
+            })
             .await
-        {
-            Ok(_) => {
-                info!(operation = "profile.delete", "profile mutation succeeded");
-                Ok(())
-            }
-            Err(error) => {
-                let error = map_firestore_error(error, ProfileOperation::Delete);
-                warn!(
-                    operation = "profile.delete",
-                    reason = profile_error_kind(&error),
-                    "profile mutation failed"
-                );
-                Err(error)
-            }
-        }
+            .map_err(|error| map_firestore_error(error, ProfileOperation::Delete))?;
+        delete_transaction_result(&result)
     }
 
     async fn db(&self) -> Result<&FirestoreDb, ProfileServiceError> {
@@ -453,13 +604,12 @@ impl FirestoreProfileStore {
     }
 }
 
-async fn new_firestore_db(
+pub(crate) async fn new_firestore_db(
     project_id: &str,
     emulator_host: Option<&str>,
 ) -> Result<FirestoreDb, ProfileServiceError> {
     let options = firestore_db_options(project_id, emulator_host);
     let db = if emulator_host.is_some() {
-        // The emulator accepts an owner token; never forward real ADC credentials to localhost.
         let token_source = ExternalJwtFunctionSource::new(|| async {
             let expiry = EMULATOR_TOKEN_EXPIRY
                 .parse()
@@ -479,7 +629,6 @@ async fn new_firestore_db(
     } else {
         FirestoreDb::with_options(options).await
     };
-
     db.map_err(|error| map_firestore_error(error, ProfileOperation::Initialize))
 }
 
@@ -487,102 +636,103 @@ fn firestore_db_options(project_id: &str, emulator_host: Option<&str>) -> Firest
     let api_url = emulator_host
         .map(|host| format!("http://{host}"))
         .unwrap_or_else(|| FIRESTORE_API_URL.to_owned());
-
     FirestoreDbOptions::new(project_id.to_owned()).with_firebase_api_url(api_url)
 }
 
-fn profile_error_kind(error: &ProfileServiceError) -> &'static str {
-    match error {
-        ProfileServiceError::NotFound => "not_found",
-        ProfileServiceError::AlreadyExists => "already_exists",
-        ProfileServiceError::Unavailable(_) => "unavailable",
-        ProfileServiceError::Backend(_) => "backend",
-    }
-}
-
-fn profile_document_id(user_id: &str) -> String {
+pub(crate) fn profile_document_id(user_id: &str) -> String {
     format!("uid_{}", URL_SAFE_NO_PAD.encode(user_id))
 }
 
-fn build_profile(user_id: &str, params: CreateProfileParams) -> Profile {
-    let timestamp = timestamp_now();
-    Profile {
+fn build_profile(
+    user_id: &str,
+    params: CreateProfileParams,
+    now: OffsetDateTime,
+) -> Result<Profile, ProfileServiceError> {
+    let timestamp = canonical_clock_timestamp(now)
+        .ok_or_else(|| internal_profile_error(ProfileOperation::Create))?;
+    let profile = Profile {
         id: user_id.to_owned(),
-        firstname: params.firstname,
-        lastname: params.lastname,
-        email: normalize_email(&params.email),
-        phone_number: normalize_phone(&params.phone_number),
-        marketing: params.marketing,
-        terms: params.terms,
+        first_name: params.first_name,
+        last_name: params.last_name,
+        contact_email: params.contact_email,
+        phone_number: params.phone_number,
+        marketing_opt_in: params.marketing_opt_in,
+        terms_accepted: params.terms_accepted,
         created_at: timestamp.clone(),
         updated_at: timestamp,
+    };
+    validate_stored_profile(&profile, user_id, ProfileOperation::Create)?;
+    Ok(profile)
+}
+
+fn updated_profile(
+    current: &Profile,
+    params: UpdateProfileParams,
+    now: OffsetDateTime,
+) -> Result<Option<Profile>, ProfileServiceError> {
+    let mut updated = current.clone();
+    if let Some(value) = params.first_name {
+        updated.first_name = value;
+    }
+    if let Some(value) = params.last_name {
+        updated.last_name = value;
+    }
+    if let Some(value) = params.contact_email {
+        updated.contact_email = value;
+    }
+    if let Some(value) = params.phone_number {
+        updated.phone_number = value;
+    }
+    if let Some(value) = params.marketing_opt_in {
+        updated.marketing_opt_in = value;
+    }
+    if updated == *current {
+        return Ok(None);
+    }
+    updated.updated_at = next_timestamp(&current.updated_at, now)
+        .ok_or_else(|| internal_profile_error(ProfileOperation::Update))?;
+    validate_stored_profile(&updated, &current.id, ProfileOperation::Update)?;
+    Ok(Some(updated))
+}
+
+pub(crate) fn validate_stored_profile(
+    profile: &Profile,
+    expected_id: &str,
+    operation: ProfileOperation,
+) -> Result<(), ProfileServiceError> {
+    let valid = profile.id == expected_id
+        && valid_opaque_id(&profile.id)
+        && valid_bounded_name(&profile.first_name)
+        && valid_bounded_name(&profile.last_name)
+        && normalize_contact_email(&profile.contact_email).as_deref()
+            == Some(profile.contact_email.as_str())
+        && normalize_phone_number(&profile.phone_number).as_deref()
+            == Some(profile.phone_number.as_str())
+        && profile.terms_accepted
+        && normalize_timestamp(&profile.created_at).as_deref() == Some(profile.created_at.as_str())
+        && normalize_timestamp(&profile.updated_at).as_deref() == Some(profile.updated_at.as_str())
+        && profile.created_at <= profile.updated_at;
+    if valid {
+        Ok(())
+    } else {
+        Err(internal_profile_error(operation))
     }
 }
 
-fn apply_update(profile: &mut Profile, params: UpdateProfileParams) {
-    if let Some(firstname) = params.firstname {
-        profile.firstname = firstname;
-    }
-    if let Some(lastname) = params.lastname {
-        profile.lastname = lastname;
-    }
-    if let Some(email) = params.email {
-        profile.email = normalize_email(&email);
-    }
-    if let Some(phone_number) = params.phone_number {
-        profile.phone_number = normalize_phone(&phone_number);
-    }
-    if let Some(marketing) = params.marketing {
-        profile.marketing = marketing;
-    }
-    profile.updated_at = timestamp_now();
-}
-
-fn update_field_mask(params: &UpdateProfileParams) -> Vec<String> {
-    let mut fields = Vec::new();
-    if params.firstname.is_some() {
-        fields.push("firstname".to_owned());
-    }
-    if params.lastname.is_some() {
-        fields.push("lastname".to_owned());
-    }
-    if params.email.is_some() {
-        fields.push("email".to_owned());
-    }
-    if params.phone_number.is_some() {
-        fields.push("phoneNumber".to_owned());
-    }
-    if params.marketing.is_some() {
-        fields.push("marketing".to_owned());
-    }
-    fields.push("updatedAt".to_owned());
-    fields
-}
-
-fn normalize_email(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn normalize_phone(value: &str) -> String {
-    value.trim().to_owned()
-}
-
-fn timestamp_now() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .expect("timestamp should format as rfc3339")
+fn internal_profile_error(operation: ProfileOperation) -> ProfileServiceError {
+    ProfileBackendError::new(operation, std::io::Error::other("invalid profile state")).into()
 }
 
 fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> ProfileServiceError {
-    if matches!(&error, FirestoreError::NetworkError(_))
-        || matches!(
-            &error,
-            FirestoreError::DatabaseError(database_error) if database_error.retry_possible
-        )
-    {
+    let unavailable = matches!(
+        &error,
+        FirestoreError::NetworkError(_)
+            | FirestoreError::SystemError(_)
+            | FirestoreError::ErrorInTransaction(_)
+    ) || matches!(&error, FirestoreError::DatabaseError(value) if value.retry_possible);
+    if unavailable {
         return ProfileServiceError::Unavailable(ProfileBackendError::new(operation, error));
     }
-
     match (operation, error) {
         (ProfileOperation::Create, FirestoreError::DataConflictError(_)) => {
             ProfileServiceError::AlreadyExists
@@ -598,325 +748,361 @@ fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> Pr
 
 #[cfg(test)]
 mod tests {
-    use firestore::errors::{
-        FirestoreDataConflictError, FirestoreDataNotFoundError, FirestoreDatabaseError,
-        FirestoreError, FirestoreErrorPublicGenericDetails, FirestoreNetworkError,
-    };
-    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+    use std::{error::Error as _, sync::Arc};
 
-    use crate::{config::AppConfig, error::StartupError};
+    use firestore::{FirestoreDb, errors::FirestoreError};
+    use gcloud_sdk::tonic::Status;
+    use time::macros::datetime;
 
     use super::{
-        CreateProfileParams, FIRESTORE_API_URL, MockProfileService, Profile, ProfileBackendError,
-        ProfileOperation, ProfileService, ProfileServiceError, UpdateProfileParams,
-        firestore_db_options, map_firestore_error, profile_document_id, profile_error_kind,
-        timestamp_now, update_field_mask,
+        CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
+        ProfileServiceError, StoredProfile, TransactionOutcome, UpdateProfileParams,
+        create_transaction_result, delete_transaction_result, map_firestore_error,
+        profile_document_id, update_transaction_result, validate_stored_profile,
     };
 
+    fn create_params(first_name: &str) -> CreateProfileParams {
+        CreateProfileParams {
+            first_name: first_name.to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+        }
+    }
+
     #[test]
-    fn firestore_document_id_safely_encodes_opaque_firebase_uids() {
+    fn firestore_document_id_safely_encodes_opaque_principals() {
         assert_eq!(profile_document_id("tenant/user"), "uid_dGVuYW50L3VzZXI");
         assert_eq!(profile_document_id("."), "uid_Lg");
         assert_eq!(profile_document_id(".."), "uid_Li4");
-
-        for user_id in ["tenant/user", ".", "..", "\u{ffff}"] {
-            let document_id = profile_document_id(user_id);
-            assert!(!document_id.contains('/'));
-            assert_ne!(document_id, ".");
-            assert_ne!(document_id, "..");
-            assert!(!document_id.starts_with("__"));
-        }
     }
 
     #[test]
-    fn firestore_endpoint_is_derived_only_from_validated_config() {
-        let production = firestore_db_options("project", None);
-        assert_eq!(
-            production.firebase_api_url.as_deref(),
-            Some(FIRESTORE_API_URL)
-        );
-
-        let emulator = firestore_db_options("project", Some("127.0.0.1:8085"));
-        assert_eq!(
-            emulator.firebase_api_url.as_deref(),
-            Some("http://127.0.0.1:8085")
-        );
-    }
-
-    #[test]
-    fn firestore_service_rejects_unsafe_emulator_host_before_initialization() {
-        let config = AppConfig {
-            port: 8080,
-            firebase_project_id: "project".to_owned(),
-            app_environment: crate::config::AppEnvironment::Test,
-            github_token: None,
-            google_application_credentials: None,
-            firebase_auth_emulator_host: None,
-            firestore_emulator_host: Some("firestore.example.com:8080".to_owned()),
-            google_cloud_project: None,
-            gcp_project: None,
-            gcloud_project: None,
-            project_id: None,
+    fn profile_round_trips_through_the_native_firestore_codec() {
+        let profile = Profile {
+            id: "user-123".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-07-30T12:00:00.000Z".to_owned(),
+            updated_at: "2026-07-30T12:00:00.000Z".to_owned(),
         };
-
-        assert!(matches!(
-            ProfileService::firestore(&config),
-            Err(StartupError::UnsafeEmulatorHost {
-                variable: "FIRESTORE_EMULATOR_HOST",
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn mock_service_normalizes_email_and_phone() {
-        let service = ProfileService::mock(MockProfileService::default());
-        let profile = service
-            .create(
-                "user-123",
-                CreateProfileParams {
-                    firstname: "John".to_owned(),
-                    lastname: "Doe".to_owned(),
-                    email: "  JOHN@EXAMPLE.COM  ".to_owned(),
-                    phone_number: "  +358401234567  ".to_owned(),
-                    marketing: true,
-                    terms: true,
-                },
-            )
-            .await
-            .expect("profile should be created");
-
-        assert_eq!(profile.email, "john@example.com");
-        assert_eq!(profile.phone_number, "+358401234567");
-    }
-
-    #[tokio::test]
-    async fn mock_service_rejects_duplicate_create() {
-        let service = ProfileService::mock(MockProfileService::default());
-
-        service
-            .create(
-                "user-123",
-                CreateProfileParams {
-                    firstname: "John".to_owned(),
-                    lastname: "Doe".to_owned(),
-                    email: "john@example.com".to_owned(),
-                    phone_number: "+358401234567".to_owned(),
-                    marketing: false,
-                    terms: true,
-                },
-            )
-            .await
-            .expect("first create should succeed");
-
-        let error = service
-            .create(
-                "user-123",
-                CreateProfileParams {
-                    firstname: "Jane".to_owned(),
-                    lastname: "Doe".to_owned(),
-                    email: "jane@example.com".to_owned(),
-                    phone_number: "+358401234567".to_owned(),
-                    marketing: false,
-                    terms: true,
-                },
-            )
-            .await
-            .expect_err("duplicate create should fail");
-
-        assert!(matches!(error, ProfileServiceError::AlreadyExists));
-    }
-
-    #[tokio::test]
-    async fn mock_service_updates_selected_fields() {
-        let service = ProfileService::mock(MockProfileService::default());
-        service
-            .create(
-                "user-123",
-                CreateProfileParams {
-                    firstname: "John".to_owned(),
-                    lastname: "Doe".to_owned(),
-                    email: "john@example.com".to_owned(),
-                    phone_number: "+358401234567".to_owned(),
-                    marketing: false,
-                    terms: true,
-                },
-            )
-            .await
-            .expect("create should succeed");
-
-        let updated = service
-            .update(
-                "user-123",
-                UpdateProfileParams {
-                    firstname: Some("Jane".to_owned()),
-                    marketing: Some(true),
-                    ..UpdateProfileParams::default()
-                },
-            )
-            .await
-            .expect("update should succeed");
-
-        assert_eq!(updated.firstname, "Jane");
-        assert!(updated.marketing);
-        assert_eq!(updated.lastname, "Doe");
+        let document = FirestoreDb::serialize_to_doc(
+            "projects/test/databases/(default)/documents/profiles/uid_dXNlci0xMjM",
+            &profile,
+        )
+        .expect("serialize profile");
+        let decoded: StoredProfile =
+            FirestoreDb::deserialize_doc_to(&document).expect("deserialize profile");
+        let decoded = Profile::from(decoded);
+        assert_eq!(decoded, profile);
     }
 
     #[test]
-    fn firestore_update_mask_contains_only_changed_fields_and_audit_timestamp() {
-        let mask = update_field_mask(&UpdateProfileParams {
-            firstname: Some("Jane".to_owned()),
-            email: Some("jane@example.com".to_owned()),
-            marketing: Some(true),
-            ..UpdateProfileParams::default()
-        });
-
-        assert_eq!(mask, ["firstname", "email", "marketing", "updatedAt"]);
-    }
-
-    #[test]
-    fn generated_profile_timestamps_are_rfc3339() {
-        let timestamp = timestamp_now();
-        assert!(OffsetDateTime::parse(&timestamp, &Rfc3339).is_ok());
-    }
-
-    #[test]
-    fn profile_log_categories_are_stable_and_non_sensitive() {
-        assert_eq!(
-            profile_error_kind(&ProfileServiceError::NotFound),
-            "not_found"
-        );
-        assert_eq!(
-            profile_error_kind(&ProfileServiceError::AlreadyExists),
-            "already_exists"
-        );
-        assert_eq!(
-            profile_error_kind(&ProfileServiceError::Backend(ProfileBackendError::new(
-                ProfileOperation::Get,
-                std::io::Error::other("secret detail"),
-            ))),
-            "backend"
-        );
-        assert_eq!(
-            profile_error_kind(&ProfileServiceError::Unavailable(ProfileBackendError::new(
-                ProfileOperation::Get,
-                std::io::Error::other("temporary failure"),
-            ),)),
-            "unavailable"
-        );
-    }
-
-    #[test]
-    fn backend_errors_retain_typed_sources_without_exposing_details_in_display_or_debug() {
-        use std::error::Error as _;
-
+    fn backend_errors_are_safe_and_preserve_the_internal_source() {
         let error = ProfileBackendError::new(
-            ProfileOperation::Update,
-            std::io::Error::other("secret database response"),
+            ProfileOperation::Get,
+            std::io::Error::other("private sentinel"),
         );
-
-        assert_eq!(error.operation(), ProfileOperation::Update);
-        assert_eq!(error.to_string(), "profile update backend error");
+        assert_eq!(error.operation(), ProfileOperation::Get);
+        assert_eq!(error.to_string(), "profile get backend error");
+        assert_eq!(
+            format!("{error:?}"),
+            "ProfileBackendError { operation: Get, .. }"
+        );
         assert_eq!(
             error.source().map(ToString::to_string).as_deref(),
-            Some("secret database response")
+            Some("private sentinel")
         );
-        assert!(!format!("{error:?}").contains("secret database response"));
-        assert!(format!("{error:?}").contains("operation: Update"));
+
+        for (operation, expected) in [
+            (ProfileOperation::Initialize, "initialize"),
+            (ProfileOperation::Create, "create"),
+            (ProfileOperation::Get, "get"),
+            (ProfileOperation::Update, "update"),
+            (ProfileOperation::Delete, "delete"),
+        ] {
+            assert_eq!(operation.to_string(), expected);
+        }
     }
 
     #[test]
-    fn firestore_conflicts_map_by_operation_and_not_found_is_operation_independent() {
-        let conflict = || {
-            FirestoreError::DataConflictError(FirestoreDataConflictError::new(
-                FirestoreErrorPublicGenericDetails::new("ALREADY_EXISTS".to_owned()),
-                "conflict detail".to_owned(),
-            ))
+    fn stored_profile_validation_checks_every_persisted_invariant() {
+        let valid = Profile {
+            id: "user-123".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-07-30T12:00:00.000Z".to_owned(),
+            updated_at: "2026-07-30T12:00:00.001Z".to_owned(),
         };
+        validate_stored_profile(&valid, "user-123", ProfileOperation::Get).expect("valid");
 
-        assert!(matches!(
-            map_firestore_error(conflict(), ProfileOperation::Create),
-            ProfileServiceError::AlreadyExists
-        ));
-        for operation in [ProfileOperation::Update, ProfileOperation::Delete] {
+        let invalid = [
+            Profile {
+                id: "other".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                id: String::new(),
+                ..valid.clone()
+            },
+            Profile {
+                first_name: String::new(),
+                ..valid.clone()
+            },
+            Profile {
+                last_name: " ".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                contact_email: "Ada@EXAMPLE.COM".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                phone_number: "+358 40 1234567".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                terms_accepted: false,
+                ..valid.clone()
+            },
+            Profile {
+                created_at: "2026-07-30T12:00:00Z".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                updated_at: "not-a-time".to_owned(),
+                ..valid.clone()
+            },
+            Profile {
+                created_at: "2026-07-30T12:00:00.002Z".to_owned(),
+                updated_at: "2026-07-30T12:00:00.001Z".to_owned(),
+                ..valid
+            },
+        ];
+        for profile in invalid {
             assert!(matches!(
-                map_firestore_error(conflict(), operation),
-                ProfileServiceError::NotFound
+                validate_stored_profile(&profile, "user-123", ProfileOperation::Update),
+                Err(ProfileServiceError::Backend(_))
             ));
         }
-        let backend = map_firestore_error(conflict(), ProfileOperation::Get);
-        assert!(matches!(
-            backend,
-            ProfileServiceError::Backend(error)
-                if error.operation() == ProfileOperation::Get
-        ));
+    }
 
-        let missing = FirestoreError::DataNotFoundError(FirestoreDataNotFoundError::new(
-            FirestoreErrorPublicGenericDetails::new("NOT_FOUND".to_owned()),
-            "missing detail".to_owned(),
+    #[test]
+    fn firestore_error_mapping_preserves_retry_and_operation_semantics() {
+        assert!(matches!(
+            map_firestore_error(
+                FirestoreError::from(Status::unavailable("transient")),
+                ProfileOperation::Get,
+            ),
+            ProfileServiceError::Unavailable(_)
         ));
         assert!(matches!(
-            map_firestore_error(missing, ProfileOperation::Create),
+            map_firestore_error(
+                FirestoreError::from(Status::invalid_argument("permanent")),
+                ProfileOperation::Get,
+            ),
+            ProfileServiceError::Backend(_)
+        ));
+        assert!(matches!(
+            map_firestore_error(
+                FirestoreError::from(Status::already_exists("exists")),
+                ProfileOperation::Create,
+            ),
+            ProfileServiceError::AlreadyExists
+        ));
+        assert!(matches!(
+            map_firestore_error(
+                FirestoreError::from(Status::already_exists("conflict")),
+                ProfileOperation::Update,
+            ),
+            ProfileServiceError::NotFound
+        ));
+        assert!(matches!(
+            map_firestore_error(
+                FirestoreError::from(Status::not_found("missing")),
+                ProfileOperation::Create,
+            ),
             ProfileServiceError::NotFound
         ));
     }
 
     #[test]
-    fn transient_firestore_failures_map_to_service_unavailable() {
-        let public = || FirestoreErrorPublicGenericDetails::new("UNAVAILABLE".to_owned());
-        let network = FirestoreError::NetworkError(FirestoreNetworkError::new(
-            public(),
-            "connection failed".to_owned(),
-        ));
-        assert!(matches!(
-            map_firestore_error(network, ProfileOperation::Get),
-            ProfileServiceError::Unavailable(error)
-                if error.operation() == ProfileOperation::Get
-        ));
+    fn native_transaction_outcomes_map_to_exact_public_results() {
+        let profile = Profile {
+            id: "user-123".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-07-30T12:00:00.000Z".to_owned(),
+            updated_at: "2026-07-30T12:00:00.000Z".to_owned(),
+        };
 
-        let retryable = FirestoreError::DatabaseError(FirestoreDatabaseError::new(
-            public(),
-            "retryable database failure".to_owned(),
-            true,
-        ));
+        assert_eq!(
+            create_transaction_result(TransactionOutcome::Profile(profile.clone()))
+                .expect("created"),
+            profile
+        );
         assert!(matches!(
-            map_firestore_error(retryable, ProfileOperation::Update),
-            ProfileServiceError::Unavailable(error)
-                if error.operation() == ProfileOperation::Update
+            create_transaction_result(TransactionOutcome::Exists),
+            Err(ProfileServiceError::AlreadyExists)
         ));
+        for outcome in [
+            TransactionOutcome::NotFound,
+            TransactionOutcome::NoChange(profile.clone()),
+            TransactionOutcome::TimestampExhausted,
+            TransactionOutcome::Deleted,
+        ] {
+            assert!(matches!(
+                create_transaction_result(outcome),
+                Err(ProfileServiceError::Backend(_))
+            ));
+        }
 
-        let permanent = FirestoreError::DatabaseError(FirestoreDatabaseError::new(
-            public(),
-            "permanent database failure".to_owned(),
-            false,
-        ));
+        for outcome in [
+            TransactionOutcome::Profile(profile.clone()),
+            TransactionOutcome::NoChange(profile.clone()),
+        ] {
+            assert_eq!(
+                update_transaction_result(outcome).expect("updated"),
+                profile
+            );
+        }
         assert!(matches!(
-            map_firestore_error(permanent, ProfileOperation::Delete),
-            ProfileServiceError::Backend(error)
-                if error.operation() == ProfileOperation::Delete
+            update_transaction_result(TransactionOutcome::NotFound),
+            Err(ProfileServiceError::NotFound)
         ));
+        for outcome in [
+            TransactionOutcome::Exists,
+            TransactionOutcome::TimestampExhausted,
+            TransactionOutcome::Deleted,
+        ] {
+            assert!(matches!(
+                update_transaction_result(outcome),
+                Err(ProfileServiceError::Backend(_))
+            ));
+        }
+
+        assert!(delete_transaction_result(&TransactionOutcome::Deleted).is_ok());
+        assert!(matches!(
+            delete_transaction_result(&TransactionOutcome::NotFound),
+            Err(ProfileServiceError::NotFound)
+        ));
+        for outcome in [
+            TransactionOutcome::Profile(profile.clone()),
+            TransactionOutcome::Exists,
+            TransactionOutcome::NoChange(profile),
+            TransactionOutcome::TimestampExhausted,
+        ] {
+            assert!(matches!(
+                delete_transaction_result(&outcome),
+                Err(ProfileServiceError::Backend(_))
+            ));
+        }
     }
 
     #[tokio::test]
-    async fn mock_service_can_seed_an_existing_profile() {
+    async fn mock_create_is_atomic_under_concurrency() {
+        let mock = MockProfileService::default();
+        let left = mock.clone();
+        let right = mock.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let spawn =
+            |store: MockProfileService, name: &'static str, barrier: Arc<tokio::sync::Barrier>| {
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    store.create("user-123", create_params(name))
+                })
+            };
+        let first = spawn(left, "Ada", Arc::clone(&barrier));
+        let second = spawn(right, "Grace", Arc::clone(&barrier));
+        barrier.wait().await;
+        let outcomes = [first.await.expect("task"), second.await.expect("task")];
+        assert_eq!(outcomes.iter().filter(|value| value.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|value| matches!(value, Err(ProfileServiceError::AlreadyExists)))
+                .count(),
+            1
+        );
+        assert_eq!(mock.committed_write_count(), 1);
+    }
+
+    #[test]
+    fn no_op_update_preserves_timestamp_and_commits_no_write() {
+        let mock = MockProfileService::default();
+        let created = mock
+            .create("user-123", create_params("Ada"))
+            .expect("create");
+        let updated = mock
+            .update(
+                "user-123",
+                UpdateProfileParams {
+                    first_name: Some("Ada".to_owned()),
+                    ..UpdateProfileParams::default()
+                },
+            )
+            .expect("update");
+        assert_eq!(updated, created);
+        assert_eq!(mock.committed_write_count(), 1);
+    }
+
+    #[test]
+    fn real_update_is_monotonic_and_max_timestamp_fails_without_write() {
+        let mock = MockProfileService::default().with_now(datetime!(2025-01-01 0:00 UTC));
         let profile = Profile {
             id: "user-123".to_owned(),
-            firstname: "Jane".to_owned(),
-            lastname: "Doe".to_owned(),
-            email: "jane@example.com".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada@example.com".to_owned(),
             phone_number: "+358401234567".to_owned(),
-            marketing: false,
-            terms: true,
-            created_at: "2026-01-01T00:00:00Z".to_owned(),
-            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-01-01T00:00:00.000Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_owned(),
         };
-        let service = ProfileService::mock(MockProfileService::default().with_profile(profile));
+        let mock = mock.with_profile(profile);
+        let updated = mock
+            .update(
+                "user-123",
+                UpdateProfileParams {
+                    marketing_opt_in: Some(true),
+                    ..UpdateProfileParams::default()
+                },
+            )
+            .expect("update");
+        assert_eq!(updated.updated_at, "2026-01-01T00:00:00.001Z");
 
-        let loaded = service
-            .get("user-123")
-            .await
-            .expect("seeded profile should load");
-        assert_eq!(loaded.firstname, "Jane");
-        assert_eq!(loaded.email, "jane@example.com");
+        let max = Profile {
+            updated_at: crate::validation::MAX_TIMESTAMP.to_owned(),
+            ..updated
+        };
+        let max_store = MockProfileService::default().with_profile(max.clone());
+        let writes = max_store.committed_write_count();
+        assert!(matches!(
+            max_store.update(
+                "user-123",
+                UpdateProfileParams {
+                    marketing_opt_in: Some(false),
+                    ..UpdateProfileParams::default()
+                }
+            ),
+            Err(ProfileServiceError::Backend(_))
+        ));
+        assert_eq!(max_store.committed_write_count(), writes);
+        assert_eq!(max_store.stored_profile("user-123"), Some(max));
     }
 }

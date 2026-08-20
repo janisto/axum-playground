@@ -45,6 +45,21 @@ fn binary_rejects_an_unknown_environment() {
 }
 
 #[test]
+fn profile_migration_binary_rejects_invalid_arguments_before_startup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_migrate_profiles"))
+        .arg("--unknown")
+        .output()
+        .expect("profile migration binary should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("usage error should be UTF-8"),
+        "usage: cargo run --locked --bin migrate_profiles -- [--audit | --apply --confirm-project <project-id>]\n"
+    );
+}
+
+#[test]
 fn tracing_initialization_emits_structured_json() {
     if std::env::var_os(TRACING_CHILD_ENV).is_some() {
         init_tracing(axum_playground::AppEnvironment::Test)

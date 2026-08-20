@@ -1,521 +1,758 @@
 mod common;
 
+use std::{convert::Infallible, sync::Arc};
+
 use axum::{
-    body::Body,
+    body::{Body, Bytes, to_bytes},
     http::{Method, Request, StatusCode, header},
 };
 use axum_playground::{
-    AuthError, MockAuthVerifier, MockProfileService, Profile, ProfileBackendError,
-    ProfileOperation, ProfileService, ProfileServiceError, build_app, problem::ProblemDetails,
+    AuthError, FirebaseUser, MockAuthVerifier, MockGitHubService, MockProfileService, Profile,
+    ProfileBackendError, ProfileOperation, ProfileServiceError, build_app,
+    problem::{ProblemCode, ProblemDetails},
 };
+use futures_util::{StreamExt, stream};
+use time::macros::datetime;
 use tower::ServiceExt;
 
-use crate::common::{
-    read_cbor_body, read_json_body, read_text_body, test_state, test_state_with_auth_and_profile,
-};
+use crate::common::{read_cbor_body, read_json_body, state_with, test_state};
 
-fn authorized_request(method: Method, uri: &str, body: Body) -> Request<Body> {
+const CREATE: &str = r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":" Ada.Lovelace@EXAMPLE.COM\t","phoneNumber":" +358401234567 ","termsAccepted":true}"#;
+const BODY_LIMIT: usize = 1_000_000;
+
+fn authorized(method: Method, body: impl Into<Body>) -> Request<Body> {
     Request::builder()
         .method(method)
-        .uri(uri)
-        .header(header::AUTHORIZATION, "Bearer valid-token")
-        .body(body)
-        .expect("request should build")
+        .uri("/v1/profile")
+        .header(header::AUTHORIZATION, "Bearer test-token")
+        .body(body.into())
+        .unwrap()
 }
 
-fn authorized_json_request(method: Method, uri: &str, body: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::AUTHORIZATION, "Bearer valid-token")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_owned()))
-        .expect("request should build")
+fn authorized_json(method: Method, body: impl Into<Body>) -> Request<Body> {
+    let mut request = authorized(method, body);
+    request
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    request
+}
+
+async fn assert_problem(response: axum::response::Response, status: StatusCode, code: ProblemCode) {
+    assert_eq!(response.status(), status);
+    let problem: ProblemDetails = if response.headers()[header::CONTENT_TYPE] == "application/cbor"
+    {
+        read_cbor_body(response).await
+    } else {
+        read_json_body(response).await
+    };
+    assert_eq!(problem.status, status.as_u16());
+    assert_eq!(problem.code, code);
+    assert_eq!(problem.detail, code.detail());
+}
+
+fn app_with(profile: MockProfileService) -> axum::Router {
+    build_app(state_with(
+        MockAuthVerifier::test_user(),
+        MockGitHubService::demo(),
+        profile,
+    ))
+}
+
+fn exact_body(size: usize) -> Vec<u8> {
+    let mut value = CREATE.as_bytes().to_vec();
+    assert!(value.len() <= size);
+    value.resize(size, b' ');
+    value
 }
 
 #[tokio::test]
-async fn profile_routes_require_bearer_auth() {
-    let missing_auth = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/profile")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
+async fn profile_crud_normalizes_contacts_and_enforces_timestamp_lifecycle() {
+    let store = MockProfileService::default();
+    let app = app_with(store.clone());
+
+    let created = app
+        .clone()
+        .oneshot(authorized_json(Method::POST, CREATE))
         .await
-        .expect("request should succeed");
-
-    assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(created.headers()[header::LOCATION], "/v1/profile");
+    let created: Profile = read_json_body(created).await;
     assert_eq!(
-        missing_auth
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer")
-    );
-
-    let invalid_auth = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/profile")
-                .header(header::AUTHORIZATION, "Basic dXNlcjpwYXNz")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(invalid_auth.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        invalid_auth
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer")
-    );
-}
-
-#[tokio::test]
-async fn profile_authentication_precedes_success_format_negotiation() {
-    for method in [Method::GET, Method::POST, Method::PATCH] {
-        for authorization in [None, Some("Basic dXNlcjpwYXNz")] {
-            let mut request = Request::builder()
-                .method(method.clone())
-                .uri("/v1/profile")
-                .header(header::ACCEPT, "text/html");
-            if let Some(authorization) = authorization {
-                request = request.header(header::AUTHORIZATION, authorization);
-            }
-
-            let response = build_app(test_state())
-                .oneshot(request.body(Body::empty()).expect("request should build"))
-                .await
-                .expect("request should succeed");
-
-            assert_eq!(
-                response.status(),
-                StatusCode::UNAUTHORIZED,
-                "{method} should authenticate before negotiating Accept"
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(header::WWW_AUTHENTICATE)
-                    .and_then(|value| value.to_str().ok()),
-                Some("Bearer")
-            );
+        created,
+        Profile {
+            id: "user-123".to_owned(),
+            first_name: "Ada".to_owned(),
+            last_name: "Lovelace".to_owned(),
+            contact_email: "Ada.Lovelace@example.com".to_owned(),
+            phone_number: "+358401234567".to_owned(),
+            marketing_opt_in: false,
+            terms_accepted: true,
+            created_at: "2026-07-30T12:00:00.000Z".to_owned(),
+            updated_at: "2026-07-30T12:00:00.000Z".to_owned(),
         }
-    }
-
-    let authenticated = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/profile")
-                .header(header::AUTHORIZATION, "Bearer valid-token")
-                .header(header::ACCEPT, "text/html")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(authenticated.status(), StatusCode::NOT_ACCEPTABLE);
-    assert_eq!(authenticated.headers().get(header::WWW_AUTHENTICATE), None);
-}
-
-#[tokio::test]
-async fn profile_crud_flow_matches_contract() {
-    let state = test_state();
-
-    let create_response = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::POST,
-            "/v1/profile",
-            r#"{"firstname":"  John ","lastname":" Doe  ","email":"JOHN@EXAMPLE.COM","phoneNumber":"+358401234567","marketing":true,"terms":true}"#,
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(create_response.status(), StatusCode::CREATED);
-    assert_eq!(
-        create_response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("/v1/profile")
     );
-    let created: Profile = read_json_body(create_response).await;
-    assert_eq!(created.id, "user-123");
-    assert_eq!(created.email, "john@example.com");
-    assert_eq!(created.phone_number, "+358401234567");
-    assert!(created.marketing);
-    assert!(created.terms);
+    assert_eq!(store.committed_write_count(), 1);
 
-    let get_response = build_app(state.clone())
+    let fetched = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .uri("/v1/profile")
-                .header(header::AUTHORIZATION, "Bearer valid-token")
+                .header(header::AUTHORIZATION, "Bearer test-token")
                 .header(header::ACCEPT, "application/cbor")
                 .body(Body::empty())
-                .expect("request should build"),
+                .unwrap(),
         )
         .await
-        .expect("request should succeed");
+        .unwrap();
+    assert_eq!(fetched.status(), StatusCode::OK);
+    assert_eq!(read_cbor_body::<Profile>(fetched).await, created);
+    assert_eq!(store.committed_write_count(), 1);
 
-    assert_eq!(get_response.status(), StatusCode::OK);
-    assert_eq!(
-        get_response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("application/cbor")
-    );
-    let fetched: Profile = read_cbor_body(get_response).await;
-    assert_eq!(fetched.id, "user-123");
-    assert_eq!(fetched.firstname, "John");
+    let no_op = app
+        .clone()
+        .oneshot(authorized_json(
+            Method::PATCH,
+            r#"{"contactEmail":"Ada.Lovelace@EXAMPLE.COM","marketingOptIn":false}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read_json_body::<Profile>(no_op).await, created);
+    assert_eq!(store.committed_write_count(), 1);
 
-    let update_response = build_app(state.clone())
+    store.set_now(datetime!(2026-07-30 12:05:00.999_999 UTC));
+    let changed = app
+        .clone()
+        .oneshot(authorized_json(
+            Method::PATCH,
+            r#"{"firstName":"Grace","marketingOptIn":true}"#,
+        ))
+        .await
+        .unwrap();
+    let changed: Profile = read_json_body(changed).await;
+    assert_eq!(changed.first_name, "Grace");
+    assert!(changed.marketing_opt_in);
+    assert_eq!(changed.last_name, "Lovelace");
+    assert_eq!(changed.created_at, created.created_at);
+    assert_eq!(changed.updated_at, "2026-07-30T12:05:00.999Z");
+    assert_eq!(store.committed_write_count(), 2);
+
+    store.set_now(datetime!(2025-01-01 0:00 UTC));
+    let monotonic = app
+        .clone()
+        .oneshot(authorized_json(Method::PATCH, r#"{"lastName":"Hopper"}"#))
+        .await
+        .unwrap();
+    let monotonic: Profile = read_json_body(monotonic).await;
+    assert_eq!(monotonic.updated_at, "2026-07-30T12:05:01.000Z");
+
+    let deleted = app
+        .clone()
         .oneshot(
             Request::builder()
-                .method(Method::PATCH)
+                .method(Method::DELETE)
                 .uri("/v1/profile")
-                .header(header::AUTHORIZATION, "Bearer valid-token")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"firstname":" Jane ","marketing":false}"#))
-                .expect("request should build"),
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
-        .expect("request should succeed");
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(!deleted.headers().contains_key(header::CONTENT_TYPE));
+    assert!(!deleted.headers().contains_key(header::CONTENT_LENGTH));
+    assert!(to_bytes(deleted.into_body(), 1).await.unwrap().is_empty());
 
-    assert_eq!(update_response.status(), StatusCode::OK);
-    let updated: Profile = read_json_body(update_response).await;
-    assert_eq!(updated.firstname, "Jane");
-    assert!(!updated.marketing);
-    assert_eq!(updated.lastname, "Doe");
-
-    let delete_response = build_app(state.clone())
-        .oneshot(authorized_request(
-            Method::DELETE,
-            "/v1/profile",
-            Body::empty(),
-        ))
+    let missing = app
+        .oneshot(authorized(Method::GET, Body::empty()))
         .await
-        .expect("request should succeed");
-
-    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
-    let vary_values = delete_response
-        .headers()
-        .get_all(header::VARY)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>();
-    assert!(vary_values.contains(&"Origin"));
-    assert!(vary_values.contains(&"Accept"));
-
-    let missing_response = build_app(state)
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+        .unwrap();
+    assert_problem(missing, StatusCode::NOT_FOUND, ProblemCode::ProfileNotFound).await;
 }
 
 #[tokio::test]
-async fn profile_validation_and_conflict_errors_map_correctly() {
-    let state = test_state();
+async fn profile_accepts_equivalent_cbor_input_and_response() {
+    let mut payload = Vec::new();
+    ciborium::into_writer(
+        &serde_json::json!({
+            "firstName":"Ada", "lastName":"Lovelace",
+            "contactEmail":"Ada@EXAMPLE.COM", "phoneNumber":"+358401234567",
+            "marketingOptIn":true, "termsAccepted":true
+        }),
+        &mut payload,
+    )
+    .unwrap();
+    let response = app_with(MockProfileService::default())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/profile")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .header(header::CONTENT_TYPE, "application/cbor")
+                .header(header::ACCEPT, "application/cbor")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/cbor");
+    let profile: Profile = read_cbor_body(response).await;
+    assert_eq!(profile.contact_email, "Ada@example.com");
+    assert!(profile.marketing_opt_in);
+}
 
-    for invalid_name in ["   ", "John\nDoe", "John\u{7f}Doe"] {
-        let body = serde_json::to_string(&serde_json::json!({
-            "firstname": invalid_name,
-            "lastname": "Doe",
-            "email": "john@example.com",
-            "phoneNumber": "+358401234567",
-            "terms": true
-        }))
-        .expect("profile body should serialize");
-        let response = build_app(state.clone())
-            .oneshot(authorized_json_request(Method::POST, "/v1/profile", &body))
+#[tokio::test]
+async fn profile_rejects_bearer_field_ambiguity_before_verification_or_persistence() {
+    let auth = MockAuthVerifier::test_user();
+    let store = MockProfileService::default();
+    let app = build_app(state_with(
+        auth.clone(),
+        MockGitHubService::demo(),
+        store.clone(),
+    ));
+
+    let simple_invalid = [
+        None,
+        Some(""),
+        Some("Basic abc"),
+        Some("Bearer"),
+        Some("Bearer "),
+        Some("Bearer\ttoken"),
+        Some("Bearer token extra"),
+        Some("Bearer token,"),
+        Some("Bearer token, Bearer other"),
+    ];
+    for value in simple_invalid {
+        let mut request = Request::builder().method(Method::GET).uri("/v1/profile");
+        if let Some(value) = value {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
             .await
-            .expect("request should succeed");
-
-        assert_eq!(
-            response.status(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{invalid_name:?}"
-        );
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{value:?}");
+        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
     }
 
-    let invalid_create = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::POST,
-            "/v1/profile",
-            r#"{"lastname":"Doe","email":"john@example.com","phoneNumber":"+358401234567","terms":true}"#,
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(invalid_create.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let invalid_problem: ProblemDetails = read_json_body(invalid_create).await;
-    assert_eq!(
-        invalid_problem.status,
-        StatusCode::UNPROCESSABLE_ENTITY.as_u16()
-    );
-
-    let invalid_terms = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::POST,
-            "/v1/profile",
-            r#"{"firstname":"John","lastname":"Doe","email":"john@example.com","phoneNumber":"+358401234567","terms":false}"#,
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(invalid_terms.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let create = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::POST,
-            "/v1/profile",
-            r#"{"firstname":"John","lastname":"Doe","email":"john@example.com","phoneNumber":"+358401234567","terms":true}"#,
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(create.status(), StatusCode::CREATED);
-
-    let null_patch = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::PATCH,
-            "/v1/profile",
-            r#"{"firstname":null,"marketing":true}"#,
-        ))
-        .await
-        .expect("request should succeed");
-    assert_eq!(null_patch.status(), StatusCode::BAD_REQUEST);
-
-    let unchanged = build_app(state.clone())
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-    let unchanged: Profile = read_json_body(unchanged).await;
-    assert_eq!(unchanged.firstname, "John");
-    assert!(!unchanged.marketing);
-
-    let duplicate = build_app(state.clone())
-        .oneshot(authorized_json_request(
-            Method::POST,
-            "/v1/profile",
-            r#"{"firstname":"John","lastname":"Doe","email":"john@example.com","phoneNumber":"+358401234567","terms":true}"#,
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
-
-    let empty_patch = build_app(state)
-        .oneshot(authorized_json_request(Method::PATCH, "/v1/profile", "{}"))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(empty_patch.status(), StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn profile_auth_certificate_fetch_failure_returns_503() {
-    let state = test_state_with_auth_and_profile(
-        axum_playground::AuthVerifier::mock(
-            MockAuthVerifier::test_user().with_error(AuthError::CertificateFetch),
-        ),
-        ProfileService::mock(MockProfileService::default()),
-    );
-
-    let response = build_app(state)
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok()),
-        Some("30")
-    );
-}
-
-#[tokio::test]
-async fn profile_auth_lookup_failure_returns_503_without_retry_hint() {
-    let state = test_state_with_auth_and_profile(
-        axum_playground::AuthVerifier::mock(
-            MockAuthVerifier::test_user().with_error(AuthError::ServiceUnavailable),
-        ),
-        ProfileService::mock(MockProfileService::default()),
-    );
-
-    let response = build_app(state)
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.headers().get(header::RETRY_AFTER), None);
-}
-
-#[tokio::test]
-async fn profile_backend_errors_return_500() {
-    let state = test_state_with_auth_and_profile(
-        axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
-        ProfileService::mock(MockProfileService::default().with_error(
-            ProfileServiceError::Backend(ProfileBackendError::new(
-                ProfileOperation::Get,
-                std::io::Error::other("unexpected database error"),
-            )),
-        )),
-    );
-
-    let response = build_app(state)
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-}
-
-#[tokio::test]
-async fn profile_transient_backend_errors_return_503() {
-    let state = test_state_with_auth_and_profile(
-        axum_playground::AuthVerifier::mock(MockAuthVerifier::test_user()),
-        ProfileService::mock(MockProfileService::default().with_error(
-            ProfileServiceError::Unavailable(ProfileBackendError::new(
-                ProfileOperation::Get,
-                std::io::Error::other("temporary database error"),
-            )),
-        )),
-    );
-
-    let response = build_app(state)
-        .oneshot(authorized_request(
-            Method::GET,
-            "/v1/profile",
-            Body::empty(),
-        ))
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-}
-
-#[tokio::test]
-async fn openapi_includes_profile_path() {
-    let response = build_app(test_state())
+    let repeated = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v1/openapi")
+                .uri("/v1/profile")
+                .header(header::AUTHORIZATION, "Bearer one")
+                .header(header::AUTHORIZATION, "Bearer two")
                 .body(Body::empty())
-                .expect("request should build"),
+                .unwrap(),
         )
         .await
-        .expect("request should succeed");
+        .unwrap();
+    assert_eq!(repeated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(auth.call_count(), 0);
+    assert_eq!(store.operation_count(ProfileOperation::Get), 0);
+}
 
-    let body = read_text_body(response).await;
-    let document: serde_json::Value =
-        serde_json::from_str(&body).expect("OpenAPI document should be JSON");
-    let post = &document["paths"]["/v1/profile"]["post"];
-
-    assert_eq!(post["security"][0]["bearerAuth"], serde_json::json!([]));
-    assert_eq!(
-        document["components"]["securitySchemes"]["bearerAuth"]["scheme"],
-        "bearer"
-    );
-    assert_eq!(
-        post["requestBody"]["content"]
-            .as_object()
-            .expect("request content should be an object")
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["application/cbor", "application/json"]
-    );
-
-    let create_schema = &document["components"]["schemas"]["CreateProfileBody"];
-    assert_eq!(
-        create_schema["required"],
-        serde_json::json!(["firstname", "lastname", "email", "phoneNumber", "terms"])
-    );
-    assert_eq!(create_schema["properties"]["firstname"]["type"], "string");
-    assert_eq!(create_schema["properties"]["firstname"]["minLength"], 1);
-    assert_eq!(create_schema["properties"]["firstname"]["maxLength"], 100);
-    assert_eq!(
-        create_schema["properties"]["firstname"]["pattern"],
-        r".*\S.*"
-    );
-    assert_eq!(
-        create_schema["properties"]["phoneNumber"]["pattern"],
-        r"^\+[1-9][0-9]{6,14}$"
-    );
-    assert_eq!(
-        create_schema["properties"]["terms"]["enum"],
-        serde_json::json!([true])
-    );
-
-    let update_schema = &document["components"]["schemas"]["UpdateProfileBody"];
-    assert!(update_schema.get("required").is_none());
-    assert_eq!(update_schema["properties"]["firstname"]["type"], "string");
-    assert_eq!(
-        update_schema["properties"]["firstname"]["pattern"],
-        r".*\S.*"
-    );
-    assert_eq!(
-        document["components"]["schemas"]["Profile"]["properties"]["createdAt"]["format"],
-        "date-time"
-    );
-
-    for method in ["get", "post", "patch", "delete"] {
-        let responses = &document["paths"]["/v1/profile"][method]["responses"];
-        assert_eq!(
-            responses["401"]["$ref"],
-            "#/components/responses/UnauthorizedProblemResponse"
-        );
-        assert_eq!(
-            responses["503"]["$ref"],
-            "#/components/responses/DependencyUnavailableProblemResponse"
-        );
+#[tokio::test]
+async fn profile_distinguishes_invalid_identity_from_auth_dependency_failure() {
+    let invalid_errors = [
+        AuthError::InvalidToken,
+        AuthError::TokenExpired,
+        AuthError::TokenRevoked,
+        AuthError::UserDisabled,
+    ];
+    for error in invalid_errors {
+        let auth = MockAuthVerifier::test_user().with_error(error);
+        let store = MockProfileService::default();
+        let response = build_app(state_with(
+            auth.clone(),
+            MockGitHubService::demo(),
+            store.clone(),
+        ))
+        .oneshot(authorized(Method::GET, Body::empty()))
+        .await
+        .unwrap();
+        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+        assert_problem(
+            response,
+            StatusCode::UNAUTHORIZED,
+            ProblemCode::Unauthorized,
+        )
+        .await;
+        assert_eq!(auth.call_count(), 1);
+        assert_eq!(store.operation_count(ProfileOperation::Get), 0);
     }
+
+    for error in [AuthError::CertificateFetch, AuthError::ServiceUnavailable] {
+        let auth = MockAuthVerifier::test_user().with_error(error);
+        let store = MockProfileService::default();
+        let response = build_app(state_with(
+            auth.clone(),
+            MockGitHubService::demo(),
+            store.clone(),
+        ))
+        .oneshot(authorized(Method::GET, Body::empty()))
+        .await
+        .unwrap();
+        assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
+        assert!(!response.headers().contains_key(header::RETRY_AFTER));
+        assert_problem(
+            response,
+            StatusCode::SERVICE_UNAVAILABLE,
+            ProblemCode::DependencyUnavailable,
+        )
+        .await;
+        assert_eq!(auth.call_count(), 1);
+        assert_eq!(store.operation_count(ProfileOperation::Get), 0);
+    }
+}
+
+#[tokio::test]
+async fn profile_route_query_negotiation_size_and_auth_order_is_fail_closed() {
+    let auth = MockAuthVerifier::test_user();
+    let store = MockProfileService::default();
+    let app = build_app(state_with(
+        auth.clone(),
+        MockGitHubService::demo(),
+        store.clone(),
+    ));
+
+    for target in [
+        "/v1/profile?owner=other",
+        "/v1/profile?x=1&x=2",
+        "/v1/profile?x=%",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(target)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
+    }
+    assert_eq!(auth.call_count(), 0);
+
+    let unacceptable = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/profile")
+                .header(header::ACCEPT, "text/html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
+    assert_eq!(auth.call_count(), 0);
+
+    let declared = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/profile")
+                .header(header::CONTENT_LENGTH, BODY_LIMIT + 1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(declared.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(auth.call_count(), 0);
+
+    let auth_failure = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/profile")
+                .header(header::AUTHORIZATION, "Basic invalid")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth_failure.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(store.operation_count(ProfileOperation::Create), 0);
+}
+
+#[tokio::test]
+async fn profile_validation_and_parse_failures_do_not_reach_persistence() {
+    let schema_cases = [
+        r#"{}"#,
+        r#"{"firstName":null}"#,
+        r#"{"firstName":3}"#,
+        r#"{"firstName":" Ada","lastName":"Lovelace","contactEmail":"a@example.com","phoneNumber":"+358401234567","termsAccepted":true}"#,
+        r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":"a@example","phoneNumber":"+358401234567","termsAccepted":true}"#,
+        r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":"a@example.com","phoneNumber":"+01234567","termsAccepted":true}"#,
+        r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":"a@example.com","phoneNumber":"+358401234567","termsAccepted":false}"#,
+        r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":"a@example.com","phoneNumber":"+358401234567","termsAccepted":true,"id":"other"}"#,
+    ];
+    for body in schema_cases {
+        let store = MockProfileService::default();
+        let response = app_with(store.clone())
+            .oneshot(authorized_json(Method::POST, body))
+            .await
+            .unwrap();
+        assert_problem(
+            response,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemCode::ValidationFailed,
+        )
+        .await;
+        assert_eq!(store.operation_count(ProfileOperation::Create), 0);
+    }
+
+    for body in [
+        r#"{"firstName":"Ada","firstName":"Grace"}"#,
+        r#"{"firstName":}"#,
+        r#"{} null"#,
+    ] {
+        let store = MockProfileService::default();
+        let response = app_with(store.clone())
+            .oneshot(authorized_json(Method::POST, body))
+            .await
+            .unwrap();
+        assert_problem(
+            response,
+            StatusCode::BAD_REQUEST,
+            ProblemCode::InvalidRequest,
+        )
+        .await;
+        assert_eq!(store.operation_count(ProfileOperation::Create), 0);
+    }
+
+    let store = MockProfileService::default();
+    let app = app_with(store.clone());
     assert_eq!(
-        document["components"]["responses"]["UnauthorizedProblemResponse"]["headers"]["WWW-Authenticate"]
-            ["schema"]["type"],
-        "string"
+        app.clone()
+            .oneshot(authorized_json(Method::POST, CREATE))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let writes = store.committed_write_count();
+    for body in [
+        "{}",
+        r#"{"firstName":null}"#,
+        r#"{"termsAccepted":true}"#,
+        r#"{"updatedAt":"2026-01-01T00:00:00.000Z"}"#,
+        r#"{"contactEmail":"not-an-email"}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(authorized_json(Method::PATCH, body))
+            .await
+            .unwrap();
+        assert_problem(
+            response,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemCode::ValidationFailed,
+        )
+        .await;
+    }
+    assert_eq!(store.committed_write_count(), writes);
+    assert_eq!(store.operation_count(ProfileOperation::Update), 0);
+}
+
+#[tokio::test]
+async fn profile_body_limits_preserve_authentication_then_suppress_persistence() {
+    for size in [999_999, BODY_LIMIT] {
+        let response = app_with(MockProfileService::default())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/profile")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CONTENT_LENGTH, size)
+                    .body(Body::from(exact_body(size)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "size {size}");
+    }
+
+    let auth = MockAuthVerifier::test_user();
+    let store = MockProfileService::default();
+    let overflow =
+        stream::once(async { Ok::<Bytes, Infallible>(Bytes::from(vec![b'x'; BODY_LIMIT + 1])) })
+            .chain(stream::once(async {
+                panic!("profile body reader polled after overflow");
+                #[allow(unreachable_code)]
+                Ok::<Bytes, Infallible>(Bytes::new())
+            }));
+    let response = build_app(state_with(
+        auth.clone(),
+        MockGitHubService::demo(),
+        store.clone(),
+    ))
+    .oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/profile")
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(overflow))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_problem(
+        response,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        ProblemCode::PayloadTooLarge,
+    )
+    .await;
+    assert_eq!(auth.call_count(), 1);
+    assert_eq!(store.operation_count(ProfileOperation::Create), 0);
+    assert_eq!(store.committed_write_count(), 0);
+}
+
+#[tokio::test]
+async fn profile_concurrent_creates_and_deletes_have_one_atomic_winner() {
+    let store = MockProfileService::default();
+    let app = app_with(store.clone());
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let spawn_create =
+        |app: axum::Router, barrier: Arc<tokio::sync::Barrier>, name: &'static str| {
+            tokio::spawn(async move {
+                barrier.wait().await;
+                app.oneshot(authorized_json(Method::POST, CREATE.replace("Ada", name)))
+                    .await
+                    .unwrap()
+            })
+        };
+    let left = spawn_create(app.clone(), Arc::clone(&barrier), "Ada");
+    let right = spawn_create(app.clone(), Arc::clone(&barrier), "Grace");
+    barrier.wait().await;
+    let outcomes = [left.await.unwrap(), right.await.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|response| response.status() == StatusCode::CREATED)
+            .count(),
+        1
     );
     assert_eq!(
-        document["components"]["responses"]["DependencyUnavailableProblemResponse"]["headers"]["Retry-After"]
-            ["schema"]["type"],
-        "string"
+        outcomes
+            .iter()
+            .filter(|response| response.status() == StatusCode::CONFLICT)
+            .count(),
+        1
     );
+    let winner = store
+        .stored_profile("user-123")
+        .expect("winner should be committed");
+    assert!(matches!(winner.first_name.as_str(), "Ada" | "Grace"));
+    assert_eq!(store.committed_write_count(), 1);
+    assert_eq!(store.operation_count(ProfileOperation::Create), 2);
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let spawn_delete = |app: axum::Router, barrier: Arc<tokio::sync::Barrier>| {
+        tokio::spawn(async move {
+            barrier.wait().await;
+            app.oneshot(authorized(Method::DELETE, Body::empty()))
+                .await
+                .unwrap()
+        })
+    };
+    let left = spawn_delete(app.clone(), Arc::clone(&barrier));
+    let right = spawn_delete(app.clone(), Arc::clone(&barrier));
+    barrier.wait().await;
+    let outcomes = [left.await.unwrap(), right.await.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|response| response.status() == StatusCode::NO_CONTENT)
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|response| response.status() == StatusCode::NOT_FOUND)
+            .count(),
+        1
+    );
+    assert!(store.stored_profile("user-123").is_none());
+}
+
+#[tokio::test]
+async fn profile_patch_delete_race_never_recreates_a_deleted_profile() {
+    let store = MockProfileService::default();
+    let app = app_with(store.clone());
+    assert_eq!(
+        app.clone()
+            .oneshot(authorized_json(Method::POST, CREATE))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let patch_app = app.clone();
+    let patch_barrier = Arc::clone(&barrier);
+    let patch = tokio::spawn(async move {
+        patch_barrier.wait().await;
+        patch_app
+            .oneshot(authorized_json(Method::PATCH, r#"{"marketingOptIn":true}"#))
+            .await
+            .unwrap()
+    });
+    let delete_app = app.clone();
+    let delete_barrier = Arc::clone(&barrier);
+    let delete = tokio::spawn(async move {
+        delete_barrier.wait().await;
+        delete_app
+            .oneshot(authorized(Method::DELETE, Body::empty()))
+            .await
+            .unwrap()
+    });
+    barrier.wait().await;
+    let patch = patch.await.unwrap();
+    let delete = delete.await.unwrap();
+    assert!(matches!(
+        patch.status(),
+        StatusCode::OK | StatusCode::NOT_FOUND
+    ));
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    assert!(store.stored_profile("user-123").is_none());
+    let read = app
+        .oneshot(authorized(Method::GET, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn profile_principals_are_isolated_and_input_cannot_select_ownership() {
+    let store = MockProfileService::default();
+    let first = build_app(state_with(
+        MockAuthVerifier::allow(FirebaseUser::new("tenant/user", "", false)),
+        MockGitHubService::demo(),
+        store.clone(),
+    ));
+    let second = build_app(state_with(
+        MockAuthVerifier::allow(FirebaseUser::new("other-user", "", false)),
+        MockGitHubService::demo(),
+        store.clone(),
+    ));
+    let a: Profile = read_json_body(
+        first
+            .oneshot(authorized_json(Method::POST, CREATE))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let b: Profile = read_json_body(
+        second
+            .oneshot(authorized_json(
+                Method::POST,
+                CREATE.replace("Ada", "Grace"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(a.id, "tenant/user");
+    assert_eq!(b.id, "other-user");
+    assert_eq!(store.committed_write_count(), 2);
+}
+
+#[tokio::test]
+async fn profile_persistence_errors_and_timestamp_exhaustion_map_without_leaks_or_writes() {
+    for (error, status, code) in [
+        (
+            ProfileServiceError::Unavailable(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("secret unavailable"),
+            )),
+            StatusCode::SERVICE_UNAVAILABLE,
+            ProblemCode::DependencyUnavailable,
+        ),
+        (
+            ProfileServiceError::Backend(ProfileBackendError::new(
+                ProfileOperation::Get,
+                std::io::Error::other("secret backend"),
+            )),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ProblemCode::InternalError,
+        ),
+    ] {
+        let store = MockProfileService::default().with_error(error);
+        let response = app_with(store.clone())
+            .oneshot(authorized(Method::GET, Body::empty()))
+            .await
+            .unwrap();
+        assert_problem(response, status, code).await;
+        assert_eq!(store.committed_write_count(), 0);
+    }
+
+    let max = Profile {
+        id: "user-123".to_owned(),
+        first_name: "Ada".to_owned(),
+        last_name: "Lovelace".to_owned(),
+        contact_email: "Ada@example.com".to_owned(),
+        phone_number: "+358401234567".to_owned(),
+        marketing_opt_in: false,
+        terms_accepted: true,
+        created_at: "9999-12-31T23:59:59.999Z".to_owned(),
+        updated_at: "9999-12-31T23:59:59.999Z".to_owned(),
+    };
+    let store = MockProfileService::default().with_profile(max.clone());
+    let response = app_with(store.clone())
+        .oneshot(authorized_json(Method::PATCH, r#"{"marketingOptIn":true}"#))
+        .await
+        .unwrap();
+    assert_problem(
+        response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ProblemCode::InternalError,
+    )
+    .await;
+    assert_eq!(store.committed_write_count(), 0);
+    assert_eq!(store.stored_profile("user-123"), Some(max));
+}
+
+#[tokio::test]
+async fn profile_body_free_and_method_boundaries_are_exact() {
+    let app = build_app(test_state());
+    let body = Body::from_stream(stream::once(async {
+        panic!("profile GET polled request content");
+        #[allow(unreachable_code)]
+        Ok::<Bytes, Infallible>(Bytes::new())
+    }));
+    let response = app
+        .clone()
+        .oneshot(authorized(Method::GET, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let method = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/v1/profile")
+                .body(Body::from(vec![0; BODY_LIMIT + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(method.headers()[header::ALLOW], "GET, POST, PATCH, DELETE");
 }

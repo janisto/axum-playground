@@ -1,22 +1,31 @@
-use std::io::Cursor;
+use std::{collections::BTreeSet, convert::Infallible, fmt, io::Cursor};
 
 use axum::{
-    body::{Body, Bytes},
+    body::{Body, Bytes, to_bytes},
     extract::{FromRequest, FromRequestParts, Request},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header, request::Parts},
     response::Response,
 };
-use serde::{Serialize, de::DeserializeOwned};
+
+pub const MAX_REQUEST_BODY_SIZE_BYTES: usize = 1_000_000;
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{DeserializeOwned, MapAccess, SeqAccess, Visitor},
+};
 
 use crate::{
     http::negotiation::{
-        CBOR_MEDIA_TYPE, JSON_MEDIA_TYPE, Representation, negotiate_api_representation,
+        CBOR_MEDIA_TYPE, JSON_MEDIA_TYPE, Representation, decode_parameter,
+        negotiate_api_representation, negotiate_json_representation, split_outside_quotes,
     },
-    problem::{ensure_vary, problem_response},
+    problem::{ProblemCode, ensure_vary, problem_response},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResponseFormat(pub Representation);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JsonResponseFormat(pub Representation);
 
 impl<S> FromRequestParts<S> for ResponseFormat
 where
@@ -27,13 +36,20 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         negotiate_api_representation(&parts.headers, true)
             .map(Self)
-            .ok_or_else(|| {
-                problem_response(
-                    StatusCode::NOT_ACCEPTABLE,
-                    "no acceptable response representation",
-                    &parts.headers,
-                )
-            })
+            .ok_or_else(|| problem_response(ProblemCode::NotAcceptable, &parts.headers))
+    }
+}
+
+impl<S> FromRequestParts<S> for JsonResponseFormat
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        negotiate_json_representation(&parts.headers)
+            .map(Self)
+            .ok_or_else(|| problem_response(ProblemCode::NotAcceptable, &parts.headers))
     }
 }
 
@@ -46,19 +62,12 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = request.headers().clone();
-        Bytes::from_request(request, state)
+        to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE_BYTES)
             .await
             .map(Self)
-            .map_err(|error| {
-                let status = error.status();
-                if status == StatusCode::PAYLOAD_TOO_LARGE {
-                    problem_response(status, "request body is too large", &headers)
-                } else {
-                    problem_response(StatusCode::BAD_REQUEST, "invalid request body", &headers)
-                }
-            })
+            .map_err(|_| problem_response(ProblemCode::PayloadTooLarge, &headers))
     }
 }
 
@@ -66,23 +75,20 @@ where
 pub enum RequestBodyDecodeError {
     Invalid,
     UnsupportedMediaType,
+    Validation,
 }
 
 impl RequestBodyDecodeError {
     #[must_use]
     pub fn into_response(self, request_headers: &HeaderMap) -> Response {
-        match self {
-            Self::Invalid => problem_response(
-                StatusCode::BAD_REQUEST,
-                "invalid request body",
-                request_headers,
-            ),
-            Self::UnsupportedMediaType => problem_response(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unsupported request media type",
-                request_headers,
-            ),
-        }
+        problem_response(
+            match self {
+                Self::Invalid => ProblemCode::InvalidRequest,
+                Self::UnsupportedMediaType => ProblemCode::UnsupportedMediaType,
+                Self::Validation => ProblemCode::ValidationFailed,
+            },
+            request_headers,
+        )
     }
 }
 
@@ -94,15 +100,23 @@ pub fn success_response<T: Serialize>(
     success_response_with_headers(status, format, body, std::iter::empty())
 }
 
+pub fn json_success_response<T: Serialize>(
+    status: StatusCode,
+    format: JsonResponseFormat,
+    body: &T,
+) -> Response {
+    success_response(status, ResponseFormat(format.0), body)
+}
+
 pub fn no_content_response(
     extra_headers: impl IntoIterator<Item = (HeaderName, HeaderValue)>,
 ) -> Response {
     let mut response = Response::builder()
         .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .expect("response should build");
-
-    ensure_vary(response.headers_mut(), ["Origin", "Accept"]);
+        .body(Body::from_stream(futures_util::stream::empty::<
+            Result<Bytes, Infallible>,
+        >()))
+        .expect("no-content response should build");
     for (name, value) in extra_headers {
         response.headers_mut().insert(name, value);
     }
@@ -119,29 +133,22 @@ where
     T: Serialize,
     I: IntoIterator<Item = (HeaderName, HeaderValue)>,
 {
-    let mut response = match format.0 {
+    let payload = match format.0 {
         Representation::Cbor => {
             let mut payload = Vec::new();
             ciborium::into_writer(body, &mut payload)
-                .expect("serializing success response to CBOR should succeed");
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, CBOR_MEDIA_TYPE)
-                .body(Body::from(payload))
-                .expect("response should build")
+                .expect("serializing a validated success response to CBOR should succeed");
+            payload
         }
-        Representation::Json => {
-            let payload = serde_json::to_vec(body)
-                .expect("serializing success response to JSON should succeed");
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, JSON_MEDIA_TYPE)
-                .body(Body::from(payload))
-                .expect("response should build")
-        }
+        Representation::Json | Representation::JsonUtf8 => serde_json::to_vec(body)
+            .expect("serializing a validated success response to JSON should succeed"),
     };
-
-    ensure_vary(response.headers_mut(), ["Origin", "Accept"]);
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, format.0.success_content_type())
+        .body(Body::from(payload))
+        .expect("success response should build");
+    ensure_vary(response.headers_mut(), ["Accept"]);
     for (name, value) in extra_headers {
         response.headers_mut().insert(name, value);
     }
@@ -160,291 +167,349 @@ where
     T: DeserializeOwned,
 {
     validate_request_content_encoding(request_headers)?;
-    let format = request_body_format(request_headers)?;
-
+    let format = request_body_format(request_headers, body.is_empty())?;
     if body.is_empty() {
         return Err(RequestBodyDecodeError::Invalid);
     }
 
     match format {
-        Representation::Json => {
-            serde_json::from_slice(&body).map_err(|_| RequestBodyDecodeError::Invalid)
+        Representation::Json | Representation::JsonUtf8 => {
+            let value = parse_strict_json(&body)?;
+            serde_json::from_value(value).map_err(|_| RequestBodyDecodeError::Validation)
         }
         Representation::Cbor => {
             let mut reader = Cursor::new(body.as_ref());
-            let value =
+            let value: ciborium::Value =
                 ciborium::from_reader(&mut reader).map_err(|_| RequestBodyDecodeError::Invalid)?;
-            if reader.position() != body.len() as u64 {
+            if reader.position() != body.len() as u64 || has_duplicate_cbor_key(&value) {
                 return Err(RequestBodyDecodeError::Invalid);
             }
-            Ok(value)
+            let mut canonical = Vec::new();
+            ciborium::into_writer(&value, &mut canonical)
+                .map_err(|_| RequestBodyDecodeError::Validation)?;
+            ciborium::from_reader(canonical.as_slice())
+                .map_err(|_| RequestBodyDecodeError::Validation)
         }
     }
 }
 
-fn request_body_format(headers: &HeaderMap) -> Result<Representation, RequestBodyDecodeError> {
-    let mut content_types = headers.get_all(header::CONTENT_TYPE).iter();
-    let content_type = content_types
-        .next()
-        .filter(|_| content_types.next().is_none())
-        .and_then(|value| value.to_str().ok())
-        .ok_or(RequestBodyDecodeError::UnsupportedMediaType)?;
-    let mut parts = content_type.split(';');
-    let media_type = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-    let parameters = parts
-        .map(str::trim)
-        .filter(|parameter| !parameter.is_empty())
+fn request_body_format(
+    headers: &HeaderMap,
+    body_is_empty: bool,
+) -> Result<Representation, RequestBodyDecodeError> {
+    let values = headers
+        .get_all(header::CONTENT_TYPE)
+        .iter()
         .collect::<Vec<_>>();
+    if values.is_empty() {
+        return if body_is_empty {
+            Err(RequestBodyDecodeError::Invalid)
+        } else {
+            Err(RequestBodyDecodeError::UnsupportedMediaType)
+        };
+    }
+    if values.len() != 1 {
+        return Err(RequestBodyDecodeError::UnsupportedMediaType);
+    }
+    let value = values[0]
+        .to_str()
+        .map_err(|_| RequestBodyDecodeError::UnsupportedMediaType)?;
+    parse_content_type(value).ok_or(RequestBodyDecodeError::UnsupportedMediaType)
+}
 
+fn parse_content_type(value: &str) -> Option<Representation> {
+    if value.contains(',') {
+        return None;
+    }
+    let parts = split_outside_quotes(value, ';')?;
+    let media_type = parts.first()?.trim().to_ascii_lowercase();
     match media_type.as_str() {
-        JSON_MEDIA_TYPE if valid_json_content_type_parameters(&parameters) => {
-            Ok(Representation::Json)
+        CBOR_MEDIA_TYPE if parts.len() == 1 => Some(Representation::Cbor),
+        JSON_MEDIA_TYPE if parts.len() == 1 => Some(Representation::Json),
+        JSON_MEDIA_TYPE if parts.len() == 2 => {
+            let (name, value) = parts[1].trim().split_once('=')?;
+            let value = decode_parameter(value.trim())?;
+            (name.trim().eq_ignore_ascii_case("charset") && value.eq_ignore_ascii_case("utf-8"))
+                .then_some(Representation::Json)
         }
-        CBOR_MEDIA_TYPE if parameters.is_empty() => Ok(Representation::Cbor),
-        _ => Err(RequestBodyDecodeError::UnsupportedMediaType),
+        _ => None,
     }
 }
 
 fn validate_request_content_encoding(headers: &HeaderMap) -> Result<(), RequestBodyDecodeError> {
-    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
-    let Some(encoding) = encodings.next() else {
+    let values = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .collect::<Vec<_>>();
+    if values.is_empty() {
         return Ok(());
-    };
-    if encodings.next().is_some()
-        || !encoding
-            .to_str()
-            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("identity"))
+    }
+    if values.len() != 1
+        || !values[0].to_str().is_ok_and(|value| {
+            !value.contains(',') && value.trim().eq_ignore_ascii_case("identity")
+        })
     {
         return Err(RequestBodyDecodeError::UnsupportedMediaType);
     }
     Ok(())
 }
 
-fn valid_json_content_type_parameters(parameters: &[&str]) -> bool {
-    match parameters {
-        [] => true,
-        [parameter] => parameter.split_once('=').is_some_and(|(name, value)| {
-            name.trim().eq_ignore_ascii_case("charset") && valid_utf8_charset(value)
-        }),
-        _ => false,
+pub(crate) fn parse_strict_json(body: &[u8]) -> Result<serde_json::Value, RequestBodyDecodeError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let StrictJsonValue(value) = StrictJsonValue::deserialize(&mut deserializer)
+        .map_err(|_| RequestBodyDecodeError::Invalid)?;
+    deserializer
+        .end()
+        .map_err(|_| RequestBodyDecodeError::Invalid)?;
+    Ok(value)
+}
+
+struct StrictJsonValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for StrictJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonVisitor)
     }
 }
 
-fn valid_utf8_charset(value: &str) -> bool {
-    let value = value.trim();
-    value.eq_ignore_ascii_case("utf-8")
-        || value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .is_some_and(|value| value.eq_ignore_ascii_case("utf-8"))
+struct StrictJsonVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonVisitor {
+    type Value = StrictJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without duplicate object names")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(value.into()))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .map(StrictJsonValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(value.into()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(value.into()))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(serde_json::Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue(serde_json::Value::Null))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        StrictJsonValue::deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(StrictJsonValue(value)) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(StrictJsonValue(serde_json::Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(serde::de::Error::custom("duplicate JSON object name"));
+            }
+            let StrictJsonValue(value) = map.next_value()?;
+            values.insert(key, value);
+        }
+        Ok(StrictJsonValue(serde_json::Value::Object(values)))
+    }
+}
+
+fn has_duplicate_cbor_key(value: &ciborium::Value) -> bool {
+    match value {
+        ciborium::Value::Map(entries) => {
+            let duplicate = entries.iter().enumerate().any(|(index, (key, _))| {
+                entries[..index].iter().any(|(previous, _)| previous == key)
+            });
+            duplicate
+                || entries.iter().any(|(key, value)| {
+                    has_duplicate_cbor_key(key) || has_duplicate_cbor_key(value)
+                })
+        }
+        ciborium::Value::Array(values) => values.iter().any(has_duplicate_cbor_key),
+        ciborium::Value::Tag(_, value) => has_duplicate_cbor_key(value),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use axum::{
         body::Bytes,
-        http::{HeaderMap, HeaderValue, StatusCode, header},
+        http::{HeaderMap, HeaderValue, header},
     };
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
 
     use super::{
-        RequestBodyDecodeError, ResponseFormat, decode_request_body, no_content_response,
-        success_response,
+        Representation, RequestBodyDecodeError, StrictJsonVisitor, decode_request_body,
+        has_duplicate_cbor_key, parse_content_type,
     };
-    use crate::http::negotiation::Representation;
 
-    #[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+    #[derive(Debug, Deserialize, Eq, PartialEq)]
+    #[serde(deny_unknown_fields)]
     struct Payload {
-        message: String,
+        name: String,
     }
 
-    #[tokio::test]
-    async fn success_response_uses_selected_format() {
-        let response = success_response(
-            StatusCode::OK,
-            ResponseFormat(Representation::Json),
-            &Payload {
-                message: "hello".to_owned(),
-            },
-        );
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE),
-            Some(&HeaderValue::from_static("application/json"))
-        );
-
-        let body = axum::body::to_bytes(response.into_body(), 1_024)
-            .await
-            .expect("body should be readable");
-        assert_eq!(body, Bytes::from_static(br#"{"message":"hello"}"#));
-    }
-
-    #[test]
-    fn no_content_response_sets_vary_headers() {
-        let response = no_content_response(std::iter::empty());
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let vary_values = response
-            .headers()
-            .get_all(header::VARY)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .collect::<Vec<_>>();
-
-        assert_eq!(vary_values, vec!["Origin", "Accept"]);
-    }
-
-    #[test]
-    fn decode_request_body_requires_an_owned_media_type() {
-        let body = Bytes::from_static(br#"{"message":"json"}"#);
-        assert_eq!(
-            decode_request_body::<Payload>(&HeaderMap::new(), body.clone()),
-            Err(RequestBodyDecodeError::UnsupportedMediaType)
-        );
-
+    fn json_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
-            HeaderValue::from_static("application/example+cbor"),
+            HeaderValue::from_static("application/json"),
         );
-        assert_eq!(
-            decode_request_body::<Payload>(&headers, body),
-            Err(RequestBodyDecodeError::UnsupportedMediaType)
-        );
+        headers
+    }
 
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/cbor; charset=utf-8"),
+    #[test]
+    fn strict_json_separates_syntax_from_schema_failures() {
+        let headers = json_headers();
+        assert_eq!(
+            decode_request_body::<Payload>(
+                &headers,
+                Bytes::from_static(br#"{"name":"Ada","name":"Grace"}"#)
+            ),
+            Err(RequestBodyDecodeError::Invalid)
         );
         assert_eq!(
             decode_request_body::<Payload>(
                 &headers,
-                Bytes::from_static(br#"{\"message\":\"json\"}"#),
+                Bytes::from_static(br#"{"name":"Ada","extra":true}"#)
             ),
-            Err(RequestBodyDecodeError::UnsupportedMediaType)
-        );
-    }
-
-    #[test]
-    fn decode_request_body_rejects_ambiguous_content_metadata() {
-        let body = Bytes::from_static(br#"{"message":"json"}"#);
-        let mut headers = HeaderMap::new();
-        headers.append(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.append(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/cbor"),
+            Err(RequestBodyDecodeError::Validation)
         );
         assert_eq!(
-            decode_request_body::<Payload>(&headers, body.clone()),
-            Err(RequestBodyDecodeError::UnsupportedMediaType)
-        );
-
-        headers.clear();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        assert_eq!(
-            decode_request_body::<Payload>(&headers, body.clone()),
-            Err(RequestBodyDecodeError::UnsupportedMediaType)
-        );
-
-        headers.insert(
-            header::CONTENT_ENCODING,
-            HeaderValue::from_static("identity"),
-        );
-        assert_eq!(
-            decode_request_body::<Payload>(&headers, body),
-            Ok(Payload {
-                message: "json".to_owned()
-            })
-        );
-    }
-
-    #[test]
-    fn decode_request_body_supports_json_and_one_cbor_item() {
-        let mut json_headers = HeaderMap::new();
-        json_headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json; charset=UTF-8"),
-        );
-        let json = decode_request_body::<Payload>(
-            &json_headers,
-            Bytes::from_static(br#"{"message":"json"}"#),
-        )
-        .expect("json payload should decode");
-        assert_eq!(json.message, "json");
-
-        let mut cbor_headers = HeaderMap::new();
-        cbor_headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/cbor"),
-        );
-        let mut payload = Vec::new();
-        ciborium::into_writer(
-            &Payload {
-                message: "cbor".to_owned(),
-            },
-            &mut payload,
-        )
-        .expect("CBOR payload should serialize");
-
-        let cbor = decode_request_body::<Payload>(&cbor_headers, Bytes::from(payload.clone()))
-            .expect("CBOR payload should decode");
-        assert_eq!(cbor.message, "cbor");
-
-        payload.push(0xf6);
-        assert_eq!(
-            decode_request_body::<Payload>(&cbor_headers, Bytes::from(payload)),
+            decode_request_body::<Payload>(&headers, Bytes::from_static(br#"{"name":"Ada"} null"#)),
             Err(RequestBodyDecodeError::Invalid)
         );
     }
 
     #[test]
-    fn decode_request_body_requires_balanced_json_charset_quotes() {
-        for content_type in [
-            "application/json; charset=utf-8",
-            "application/json; charset=\"UTF-8\"",
+    fn empty_and_missing_media_follow_the_exact_precedence() {
+        assert_eq!(
+            decode_request_body::<Payload>(&HeaderMap::new(), Bytes::new()),
+            Err(RequestBodyDecodeError::Invalid)
+        );
+        assert_eq!(
+            decode_request_body::<Payload>(&HeaderMap::new(), Bytes::from_static(b"{}")),
+            Err(RequestBodyDecodeError::UnsupportedMediaType)
+        );
+    }
+
+    #[test]
+    fn content_type_parser_accepts_only_the_owned_exact_forms() {
+        for (value, expected) in [
+            ("application/json", Representation::Json),
+            ("Application/JSON", Representation::Json),
+            ("application/json;charset=utf-8", Representation::Json),
+            ("application/json; CHARSET=\"UTF-8\"", Representation::Json),
+            ("application/json;charset=\"utf\\-8\"", Representation::Json),
+            ("application/cbor", Representation::Cbor),
         ] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(content_type).expect("content type should be valid"),
-            );
-            assert!(
-                decode_request_body::<Payload>(
-                    &headers,
-                    Bytes::from_static(br#"{"message":"json"}"#),
-                )
-                .is_ok()
-            );
+            assert_eq!(parse_content_type(value), Some(expected), "{value}");
         }
 
-        for content_type in [
-            "application/json; charset=\"utf-8",
-            "application/json; charset=utf-8\"",
-            "application/json; charset=\"\"utf-8\"\"",
-            "application/json; charset=iso-8859-1",
+        for value in [
+            "application/cbor;charset=utf-8",
+            "application/json;charset=utf-8;version=1",
+            "application/json;boundary=utf-8",
+            "application/json;charset=latin1",
+            "application/json;charset=",
+            "application/json;charset=\"\"",
+            "application/json;charset=\"utf-8",
+            "application/json;charset=\"utf-8\\\"",
+            "application/json;charset=\"utf\"-8\"",
+            "application/json;charset=\"utf\n-8\"",
+            "application/json,application/cbor",
         ] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(content_type).expect("content type should be valid"),
-            );
-            assert_eq!(
-                decode_request_body::<Payload>(
-                    &headers,
-                    Bytes::from_static(br#"{"message":"json"}"#),
-                ),
-                Err(RequestBodyDecodeError::UnsupportedMediaType),
-                "{content_type} should be rejected"
-            );
+            assert_eq!(parse_content_type(value), None, "{value}");
         }
+    }
+
+    #[test]
+    fn strict_json_diagnostic_and_nested_cbor_duplicate_detection_are_stable() {
+        let error = <serde::de::value::Error as serde::de::Error>::invalid_type(
+            serde::de::Unexpected::Unit,
+            &StrictJsonVisitor,
+        );
+        assert_eq!(
+            error.to_string(),
+            "invalid type: unit value, expected a JSON value without duplicate object names"
+        );
+
+        let duplicate = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("key".to_owned()),
+                ciborium::Value::Bool(true),
+            ),
+            (
+                ciborium::Value::Text("key".to_owned()),
+                ciborium::Value::Bool(false),
+            ),
+        ]);
+        assert!(has_duplicate_cbor_key(&ciborium::Value::Array(vec![
+            duplicate.clone()
+        ])));
+        assert!(has_duplicate_cbor_key(&ciborium::Value::Tag(
+            42,
+            Box::new(duplicate)
+        )));
+        assert!(has_duplicate_cbor_key(&ciborium::Value::Map(vec![(
+            ciborium::Value::Text("outer".to_owned()),
+            ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text("nested".to_owned()),
+                    ciborium::Value::Bool(true),
+                ),
+                (
+                    ciborium::Value::Text("nested".to_owned()),
+                    ciborium::Value::Bool(false),
+                ),
+            ]),
+        )])));
+        assert!(!has_duplicate_cbor_key(&ciborium::Value::Array(vec![
+            ciborium::Value::Text("unique".to_owned())
+        ])));
     }
 }

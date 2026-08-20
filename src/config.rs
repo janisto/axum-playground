@@ -7,7 +7,6 @@ pub struct AppConfig {
     pub port: u16,
     pub firebase_project_id: String,
     pub app_environment: AppEnvironment,
-    pub github_token: Option<String>,
     pub google_application_credentials: Option<String>,
     pub firebase_auth_emulator_host: Option<String>,
     pub firestore_emulator_host: Option<String>,
@@ -62,10 +61,6 @@ impl fmt::Debug for AppConfig {
             .field("port", &self.port)
             .field("firebase_project_id", &self.firebase_project_id)
             .field("app_environment", &self.app_environment)
-            .field(
-                "github_token",
-                &self.github_token.as_ref().map(|_| "[REDACTED]"),
-            )
             .field(
                 "google_application_credentials",
                 &self
@@ -122,7 +117,6 @@ impl AppConfig {
             firebase_project_id: firebase_project_id
                 .unwrap_or_else(|| "demo-test-project".to_owned()),
             app_environment,
-            github_token: non_blank(value_for("GITHUB_TOKEN")),
             google_application_credentials: non_blank(value_for("GOOGLE_APPLICATION_CREDENTIALS")),
             firebase_auth_emulator_host: non_blank(value_for("FIREBASE_AUTH_EMULATOR_HOST")),
             firestore_emulator_host: non_blank(value_for("FIRESTORE_EMULATOR_HOST")),
@@ -178,7 +172,6 @@ mod tests {
             ("PORT", "  "),
             ("FIREBASE_PROJECT_ID", ""),
             ("APP_ENVIRONMENT", "\t"),
-            ("GITHUB_TOKEN", "\n"),
         ]);
 
         let config = AppConfig::from_values(|key| values.get(key).map(ToString::to_string))
@@ -187,7 +180,6 @@ mod tests {
         assert_eq!(config.port, 8080);
         assert_eq!(config.firebase_project_id, "demo-test-project");
         assert_eq!(config.app_environment, AppEnvironment::Development);
-        assert_eq!(config.github_token, None);
     }
 
     #[test]
@@ -196,7 +188,6 @@ mod tests {
             ("PORT", "9090"),
             ("FIREBASE_PROJECT_ID", "firebase-project"),
             ("APP_ENVIRONMENT", "production"),
-            ("GITHUB_TOKEN", "github-token"),
             ("GOOGLE_APPLICATION_CREDENTIALS", "/credentials.json"),
             ("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:9099"),
             ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080"),
@@ -215,7 +206,6 @@ mod tests {
                 port: 9090,
                 firebase_project_id: "firebase-project".to_owned(),
                 app_environment: AppEnvironment::Production,
-                github_token: Some("github-token".to_owned()),
                 google_application_credentials: Some("/credentials.json".to_owned()),
                 firebase_auth_emulator_host: Some("127.0.0.1:9099".to_owned()),
                 firestore_emulator_host: Some("127.0.0.1:8080".to_owned()),
@@ -299,7 +289,6 @@ mod tests {
             port: 8080,
             firebase_project_id: "project".to_owned(),
             app_environment: AppEnvironment::Development,
-            github_token: Some("secret-token".to_owned()),
             google_application_credentials: Some("/secret/credentials.json".to_owned()),
             firebase_auth_emulator_host: None,
             firestore_emulator_host: None,
@@ -310,9 +299,8 @@ mod tests {
         };
 
         let output = format!("{config:?}");
-        assert!(!output.contains("secret-token"));
         assert!(!output.contains("/secret/credentials.json"));
-        assert_eq!(output.matches("[REDACTED]").count(), 2);
+        assert_eq!(output.matches("[REDACTED]").count(), 1);
     }
 
     #[test]
@@ -321,7 +309,6 @@ mod tests {
             port: 8080,
             firebase_project_id: "project".to_owned(),
             app_environment: AppEnvironment::Development,
-            github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
             firestore_emulator_host: None,
@@ -347,7 +334,6 @@ mod tests {
             port: 8080,
             firebase_project_id: "firebase".to_owned(),
             app_environment: AppEnvironment::Development,
-            github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
             firestore_emulator_host: None,

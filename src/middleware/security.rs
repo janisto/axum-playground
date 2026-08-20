@@ -16,7 +16,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     set_header_if_missing(
         headers,
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("frame-ancestors 'none'"),
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
     );
     set_header_if_missing(
         headers,

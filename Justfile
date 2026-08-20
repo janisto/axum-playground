@@ -17,7 +17,7 @@ docker-build:
 
 [group('run')]
 run:
-    cargo run --locked
+    cargo run --locked --bin axum-playground
 
 [group('lifecycle')]
 install: download install-tools

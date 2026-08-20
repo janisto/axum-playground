@@ -1,809 +1,566 @@
 mod common;
 
+use std::convert::Infallible;
+
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{Method, Request, StatusCode, header},
 };
 use axum_playground::{
-    GitHubActivity, GitHubActivityPage, GitHubListPage, GitHubRepoSummary, GitHubService,
-    GitHubServiceError, GitHubTag, GitHubTagCommit, GitHubUpstreamError, GitHubUpstreamErrorKind,
-    MockGitHubService, build_app, problem::ProblemDetails,
+    MockAuthVerifier, MockGitHubService, MockProfileService, build_app,
+    pagination::cursor::{Cursor, CursorDirection, CursorScope},
+    problem::{ProblemCode, ProblemDetails},
+    services::github::{
+        GitHubPagination, GitHubRateLimit, GitHubServiceError, GitHubUpstreamErrorKind,
+        ProviderPage,
+    },
 };
-use serde::Deserialize;
+use futures_util::stream;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::common::{read_cbor_body, read_json_body, test_state, test_state_with_github_service};
+use crate::common::{read_cbor_body, read_json_body, state_with};
 
-#[derive(Debug, Deserialize)]
-struct Owner {
-    login: String,
-    company: String,
+async fn request(mock: MockGitHubService, target: &str) -> axum::response::Response {
+    build_app(state_with(
+        MockAuthVerifier::test_user(),
+        mock,
+        MockProfileService::default(),
+    ))
+    .oneshot(Request::builder().uri(target).body(Body::empty()).unwrap())
+    .await
+    .unwrap()
 }
 
-#[derive(Debug, Deserialize)]
-struct RepoSummary {
-    name: String,
+async fn assert_problem(
+    mock: MockGitHubService,
+    target: &str,
+    status: StatusCode,
+    code: ProblemCode,
+) {
+    let response = request(mock, target).await;
+    assert_eq!(response.status(), status, "{target}");
+    let body: ProblemDetails = read_json_body(response).await;
+    assert_eq!(body.status, status.as_u16());
+    assert_eq!(body.code, code);
+    assert_eq!(body.detail, code.detail());
 }
 
-#[derive(Debug, Deserialize)]
-struct OwnerReposResponse {
-    repos: Vec<RepoSummary>,
-    count: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct Repo {
-    name: String,
-    #[serde(rename = "defaultBranch")]
-    default_branch: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoActivityResponse {
-    activities: Vec<Activity>,
-    count: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct Activity {
-    actor: Option<String>,
-    #[serde(rename = "activityType")]
-    activity_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoLanguagesResponse {
-    languages: Vec<Language>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Language {
-    name: String,
-    bytes: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoTagsResponse {
-    tags: Vec<Tag>,
-    count: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct Tag {
-    name: String,
+fn relation(link: &str, name: &str) -> Option<String> {
+    link.split(", ").find_map(|member| {
+        member
+            .ends_with(&format!("; rel=\"{name}\""))
+            .then(|| {
+                member
+                    .strip_prefix('<')?
+                    .split_once('>')
+                    .map(|(target, _)| target.to_owned())
+            })
+            .flatten()
+    })
 }
 
 #[tokio::test]
-async fn github_routes_return_demo_data_and_support_cbor() {
-    let owner_response = build_app(test_state())
+async fn all_six_github_operations_return_the_exact_public_projection() {
+    let cases = [
+        ("/v1/github/owners/octocat", "getGitHubOwner"),
+        (
+            "/v1/github/owners/octocat/repos",
+            "listGitHubOwnerRepositories",
+        ),
+        (
+            "/v1/github/repos/octocat/Hello-World",
+            "getGitHubRepository",
+        ),
+        (
+            "/v1/github/repos/octocat/Hello-World/activity",
+            "listGitHubRepositoryActivity",
+        ),
+        (
+            "/v1/github/repos/octocat/Hello-World/languages",
+            "listGitHubRepositoryLanguages",
+        ),
+        (
+            "/v1/github/repos/octocat/Hello-World/tags",
+            "listGitHubRepositoryTags",
+        ),
+    ];
+    for (target, operation) in cases {
+        let mock = MockGitHubService::demo();
+        let response = request(mock.clone(), target).await;
+        assert_eq!(response.status(), StatusCode::OK, "{operation}");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body: Value = read_json_body(response).await;
+        assert!(body.is_object());
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].operation, operation);
+
+        match operation {
+            "getGitHubOwner" => {
+                let keys = body
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    keys,
+                    [
+                        "avatarUrl",
+                        "bio",
+                        "blog",
+                        "company",
+                        "createdAt",
+                        "followers",
+                        "following",
+                        "htmlUrl",
+                        "id",
+                        "location",
+                        "login",
+                        "name",
+                        "publicRepos",
+                        "type",
+                        "updatedAt"
+                    ]
+                );
+                assert_eq!(body["id"], 583231);
+                assert_eq!(body["bio"], Value::Null);
+                assert!(body.get("email").is_none());
+            }
+            "listGitHubOwnerRepositories" => {
+                assert_eq!(body["count"], 1);
+                assert_eq!(
+                    body["repos"][0],
+                    json!({
+                        "id":1296269, "name":"Hello-World", "fullName":"octocat/Hello-World",
+                        "description":"Synthetic repository fixture",
+                        "htmlUrl":"https://github.com/octocat/Hello-World", "fork":false
+                    })
+                );
+            }
+            "getGitHubRepository" => {
+                assert_eq!(body["language"], "Rust");
+                assert_eq!(body["stargazersCount"], 42);
+                assert_eq!(body["license"], "MIT");
+                assert_eq!(body["topics"], json!(["example"]));
+                for forbidden in ["private", "visibility", "owner"] {
+                    assert!(body.get(forbidden).is_none());
+                }
+            }
+            "listGitHubRepositoryActivity" => {
+                assert_eq!(body["count"], 1);
+                assert_eq!(body["activities"][0]["actor"], "octocat");
+                assert_eq!(body["activities"][0]["ref"], "refs/heads/main");
+                assert!(body["activities"][0].get("pusher").is_none());
+            }
+            "listGitHubRepositoryLanguages" => {
+                assert_eq!(body, json!({"languages":[{"name":"Rust","bytes":6789}]}));
+            }
+            "listGitHubRepositoryTags" => {
+                assert_eq!(body["count"], 1);
+                assert_eq!(body["tags"][0]["name"], "v1.0.0");
+                assert_eq!(
+                    body["tags"][0]["commit"]["sha"],
+                    "0123456789abcdef0123456789abcdef01234567"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn github_successes_and_failures_support_cbor_without_invoking_auth() {
+    let auth = MockAuthVerifier::test_user();
+    let mock = MockGitHubService::demo();
+    let app = build_app(state_with(
+        auth.clone(),
+        mock.clone(),
+        MockProfileService::default(),
+    ));
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
-                .method(Method::GET)
                 .uri("/v1/github/owners/octocat")
+                .header(header::AUTHORIZATION, "Bearer caller-token")
+                .header(header::COOKIE, "session=secret")
                 .header(header::ACCEPT, "application/cbor")
                 .body(Body::empty())
-                .expect("request should build"),
+                .unwrap(),
         )
         .await
-        .expect("request should succeed");
-    assert_eq!(owner_response.status(), StatusCode::OK);
-    let owner: Owner = read_cbor_body(owner_response).await;
-    assert_eq!(owner.login, "octocat");
-    assert_eq!(owner.company, "@github");
-
-    let repos_response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/owners/octocat/repos")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let repos: OwnerReposResponse = read_json_body(repos_response).await;
-    assert_eq!(repos.count, 1);
-    assert_eq!(
-        repos.repos.first().map(|repo| repo.name.as_str()),
-        Some("git-consortium")
-    );
-
-    let repo_response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let repo: Repo = read_json_body(repo_response).await;
-    assert_eq!(repo.name, "git-consortium");
-    assert_eq!(repo.default_branch, "master");
-}
-
-#[tokio::test]
-async fn github_activity_languages_and_tags_routes_work() {
-    let activity_response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let activity: RepoActivityResponse = read_json_body(activity_response).await;
-    assert_eq!(activity.count, 1);
-    assert_eq!(
-        activity
-            .activities
-            .first()
-            .and_then(|event| event.actor.as_deref()),
-        Some("octocat")
-    );
-    assert_eq!(
-        activity
-            .activities
-            .first()
-            .map(|event| event.activity_type.as_str()),
-        Some("push")
-    );
-
-    let languages_response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/languages")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let languages: RepoLanguagesResponse = read_json_body(languages_response).await;
-    assert_eq!(
-        languages
-            .languages
-            .first()
-            .map(|language| language.name.as_str()),
-        Some("Ruby")
-    );
-    assert_eq!(
-        languages.languages.first().map(|language| language.bytes),
-        Some(6789)
-    );
-
-    let tags_response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/tags")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let tags: RepoTagsResponse = read_json_body(tags_response).await;
-    assert_eq!(tags.count, 1);
-    assert_eq!(tags.tags.first().map(|tag| tag.name.as_str()), Some("v1.0"));
-}
-
-#[tokio::test]
-async fn github_repositories_and_tags_expose_upstream_next_pages_as_opaque_links() {
-    let service = GitHubService::mock(
-        MockGitHubService::demo()
-            .with_repos_page(GitHubListPage {
-                items: vec![GitHubRepoSummary {
-                    name: "git-consortium".to_owned(),
-                    full_name: "octocat/git-consortium".to_owned(),
-                    description: "demo".to_owned(),
-                    html_url: "https://github.com/octocat/git-consortium".to_owned(),
-                    language: "Rust".to_owned(),
-                    stars: 1,
-                    forks: 2,
-                    open_issues: 3,
-                    created_at: "2011-01-25T18:44:36Z".to_owned(),
-                    updated_at: "2024-06-01T00:00:00Z".to_owned(),
-                }],
-                next_cursor: "2".to_owned(),
-            })
-            .with_tags_page(GitHubListPage {
-                items: vec![GitHubTag {
-                    name: "v1.0.0".to_owned(),
-                    commit: GitHubTagCommit {
-                        sha: "abc123".to_owned(),
-                    },
-                }],
-                next_cursor: "3".to_owned(),
-            }),
-    );
-    let state = test_state_with_github_service(service);
-
-    let repos_response = build_app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/owners/octocat/repos?limit=50")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let repos_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "2").encode();
-    assert_eq!(
-        repos_response
-            .headers()
-            .get(header::LINK)
-            .and_then(|value| value.to_str().ok()),
-        Some(
-            format!(
-                "</v1/github/owners/octocat/repos?limit=50&cursor={repos_cursor}>; rel=\"next\""
-            )
-            .as_str()
-        )
-    );
-    let repos: OwnerReposResponse = read_json_body(repos_response).await;
-    assert_eq!(repos.count, 1);
-
-    let tags_response = build_app(state)
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/tags?limit=25")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let tags_cursor = axum_playground::pagination::cursor::Cursor::new("gh-tags", "3").encode();
-    assert_eq!(
-        tags_response
-            .headers()
-            .get(header::LINK)
-            .and_then(|value| value.to_str().ok()),
-        Some(
-            format!(
-                "</v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={tags_cursor}>; rel=\"next\""
-            )
-            .as_str()
-        )
-    );
-}
-
-#[tokio::test]
-async fn github_repository_and_tag_pages_expose_previous_links() {
-    let service = GitHubService::mock(
-        MockGitHubService::demo()
-            .with_repos_page(GitHubListPage {
-                items: Vec::new(),
-                next_cursor: "4".to_owned(),
-            })
-            .with_tags_page(GitHubListPage {
-                items: Vec::new(),
-                next_cursor: String::new(),
-            }),
-    );
-    let state = test_state_with_github_service(service);
-
-    let current_repos_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "3").encode();
-    let repos_response = build_app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v1/github/owners/octocat/repos?limit=50&cursor={current_repos_cursor}"
-                ))
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let next_repos_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "4").encode();
-    let previous_repos_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-owner-repos", "2").encode();
-    assert_eq!(
-        repos_response
-            .headers()
-            .get(header::LINK)
-            .and_then(|value| value.to_str().ok()),
-        Some(
-            format!(
-                "</v1/github/owners/octocat/repos?limit=50&cursor={next_repos_cursor}>; rel=\"next\", </v1/github/owners/octocat/repos?limit=50&cursor={previous_repos_cursor}>; rel=\"prev\""
-            )
-            .as_str()
-        )
-    );
-
-    let current_tags_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-tags", "2").encode();
-    let tags_response = build_app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={current_tags_cursor}"
-                ))
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let first_tags_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-tags", "").encode();
-    assert_eq!(
-        tags_response
-            .headers()
-            .get(header::LINK)
-            .and_then(|value| value.to_str().ok()),
-        Some(
-            format!(
-                "</v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={first_tags_cursor}>; rel=\"prev\""
-            )
-            .as_str()
-        )
-    );
-
-    let first_tags_page = build_app(state)
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v1/github/repos/octocat/git-consortium/tags?limit=25&cursor={first_tags_cursor}"
-                ))
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(first_tags_page.status(), StatusCode::OK);
-    assert!(first_tags_page.headers().get(header::LINK).is_none());
-}
-
-#[tokio::test]
-async fn github_repository_and_tag_pagination_is_validated_before_service_calls() {
-    let cursor = |kind: &str, value: &str| {
-        axum_playground::pagination::cursor::Cursor::new(kind, value).encode()
-    };
-    for (uri, expected_status) in [
-        (
-            "/v1/github/owners/octocat/repos?limit=0".to_owned(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "/v1/github/repos/octocat/git-consortium/tags?limit=101".to_owned(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
-        (
-            "/v1/github/owners/octocat/repos?cursor=not-base64!".to_owned(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            format!(
-                "/v1/github/owners/octocat/repos?cursor={}",
-                cursor("gh-tags", "2")
-            ),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            format!(
-                "/v1/github/repos/octocat/git-consortium/tags?cursor={}",
-                cursor("gh-tags", "first")
-            ),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            format!(
-                "/v1/github/owners/octocat/repos?cursor={}",
-                cursor("gh-owner-repos", "1")
-            ),
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let service = GitHubService::mock(
-            MockGitHubService::demo().with_error(GitHubServiceError::RateLimited),
-        );
-        let response = build_app(test_state_with_github_service(service))
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should succeed");
-
-        assert_eq!(response.status(), expected_status);
-    }
-}
-
-#[tokio::test]
-async fn github_activity_uses_link_header_and_validates_cursor() {
-    let service = GitHubService::mock(MockGitHubService::demo().with_activity_page(
-        GitHubActivityPage {
-            activities: vec![
-                GitHubActivity {
-                    id: 1,
-                    actor: Some("octocat".to_owned()),
-                    git_ref: "refs/heads/master".to_owned(),
-                    timestamp: "2024-01-15T10:30:00Z".to_owned(),
-                    activity_type: "push".to_owned(),
-                    actor_avatar_url: Some(
-                        "https://avatars.githubusercontent.com/u/583231".to_owned(),
-                    ),
-                },
-                GitHubActivity {
-                    id: 2,
-                    actor: None,
-                    git_ref: "refs/heads/deleted".to_owned(),
-                    timestamp: "2024-01-15T11:30:00Z".to_owned(),
-                    activity_type: "branch_deletion".to_owned(),
-                    actor_avatar_url: None,
-                },
-            ],
-            next_cursor: "next-page-cursor".to_owned(),
-        },
-    ));
-    let response = build_app(test_state_with_github_service(service))
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=10")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let expected_cursor =
-        axum_playground::pagination::cursor::Cursor::new("gh-activity", "next-page-cursor")
-            .encode();
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/cbor");
+    let owner: Value = read_cbor_body(response).await;
+    assert_eq!(owner["login"], "octocat");
+
+    let failure = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/github/owners/octocat?unknown=1")
+                .header(header::ACCEPT, "application/cbor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(failure.headers()[header::CONTENT_TYPE], "application/cbor");
     assert_eq!(
-        response
-            .headers()
-            .get(header::LINK)
-            .and_then(|value| value.to_str().ok()),
-        Some(
-            format!(
-                "</v1/github/repos/octocat/git-consortium/activity?limit=10&cursor={expected_cursor}>; rel=\"next\""
-            )
-            .as_str()
-        )
+        read_cbor_body::<ProblemDetails>(failure).await.code,
+        ProblemCode::InvalidRequest
     );
-    let activity: RepoActivityResponse = read_json_body(response).await;
-    assert_eq!(activity.count, 2);
-    assert_eq!(activity.activities[0].actor.as_deref(), Some("octocat"));
-    assert_eq!(activity.activities[1].actor, None);
-
-    let invalid_cursor = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?cursor=not-valid-base64!")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(invalid_cursor.status(), StatusCode::BAD_REQUEST);
-
-    let wrong_type_cursor =
-        axum_playground::pagination::cursor::Cursor::new("wrong-type", "abc").encode();
-    let wrong_type = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v1/github/repos/octocat/git-consortium/activity?cursor={wrong_type_cursor}"
-                ))
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(wrong_type.status(), StatusCode::BAD_REQUEST);
-
-    let invalid_limit = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=101")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(invalid_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let zero_limit = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=0")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(zero_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let negative_limit = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=-10")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(negative_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let maximum_limit = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/repos/octocat/git-consortium/activity?limit=100")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(maximum_limit.status(), StatusCode::OK);
-
-    let untyped_cursor =
-        axum_playground::pagination::cursor::Cursor::new("", "upstream-cursor").encode();
-    let untyped = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v1/github/repos/octocat/git-consortium/activity?cursor={untyped_cursor}"
-                ))
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    assert_eq!(untyped.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(auth.call_count(), 0);
+    assert_eq!(mock.call_count(), 1);
 }
 
 #[tokio::test]
-async fn github_rejects_invalid_paths_and_query_syntax_before_service_calls() {
-    let rejecting_service = || {
-        GitHubService::mock(MockGitHubService::demo().with_error(GitHubServiceError::RateLimited))
-    };
-
-    for uri in [
-        "/v1/github/owners/-invalid",
-        "/v1/github/repos/octocat/invalid%20repo",
-        "/v1/github/repos/octocat/git-consortium/activity?limit=not-a-number",
+async fn github_path_validation_covers_exact_boundaries_without_fetching() {
+    for target in [
+        "/v1/github/owners/a",
+        "/v1/github/owners/a_b",
+        "/v1/github/repos/a/_",
+        "/v1/github/repos/a/-",
+        "/v1/github/repos/a/a.b",
     ] {
-        let response = build_app(test_state_with_github_service(rejecting_service()))
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("request should build"),
+        let mock = MockGitHubService::demo();
+        assert_eq!(
+            request(mock.clone(), target).await.status(),
+            StatusCode::OK,
+            "{target}"
+        );
+        assert_eq!(mock.call_count(), 1);
+    }
+    let owner_39 = format!("/v1/github/owners/a{}z", "x".repeat(37));
+    let repo_100 = format!("/v1/github/repos/a/{}", "x".repeat(100));
+    for target in [owner_39, repo_100] {
+        let mock = MockGitHubService::demo();
+        assert_eq!(
+            request(mock.clone(), &target).await.status(),
+            StatusCode::OK,
+            "{target}"
+        );
+        assert_eq!(mock.call_count(), 1);
+    }
+
+    let invalid = [
+        "/v1/github/owners/-a",
+        "/v1/github/owners/a-",
+        "/v1/github/owners/a.b",
+        "/v1/github/owners/%C3%A9",
+        "/v1/github/repos/a/.",
+        "/v1/github/repos/a/..",
+        "/v1/github/repos/a/...",
+        "/v1/github/repos/a/%C3%A9",
+    ];
+    for target in invalid {
+        let mock = MockGitHubService::demo();
+        let response = request(mock.clone(), target).await;
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY | StatusCode::NOT_FOUND
+            ),
+            "{target}: {}",
+            response.status()
+        );
+        assert_eq!(mock.call_count(), 0, "{target}");
+    }
+}
+
+#[tokio::test]
+async fn github_closed_query_and_limit_rejections_make_no_fetch() {
+    for target in [
+        "/v1/github/owners/octocat?limit=1",
+        "/v1/github/repos/octocat/repo?x=1",
+        "/v1/github/repos/octocat/repo/languages?cursor=x",
+        "/v1/github/owners/octocat/repos?unknown=1",
+        "/v1/github/owners/octocat/repos?limit=1&limit=2",
+        "/v1/github/owners/octocat/repos?cursor=%",
+        "/v1/github/owners/octocat/repos?cursor=%FF",
+        "/v1/github/owners/octocat/repos?cursor=",
+    ] {
+        let mock = MockGitHubService::demo();
+        assert_problem(
+            mock.clone(),
+            target,
+            StatusCode::BAD_REQUEST,
+            ProblemCode::InvalidRequest,
+        )
+        .await;
+        assert_eq!(mock.call_count(), 0, "{target}");
+    }
+    for target in [
+        "/v1/github/owners/octocat/repos?limit=0",
+        "/v1/github/owners/octocat/repos?limit=101",
+        "/v1/github/owners/octocat/repos?limit=-1",
+        "/v1/github/owners/octocat/repos?limit=1.0",
+        "/v1/github/owners/octocat/repos?limit=999999999999",
+    ] {
+        let mock = MockGitHubService::demo();
+        assert_problem(
+            mock.clone(),
+            target,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemCode::ValidationFailed,
+        )
+        .await;
+        assert_eq!(mock.call_count(), 0, "{target}");
+    }
+}
+
+#[tokio::test]
+async fn github_numbered_navigation_is_translated_to_scoped_relative_links() {
+    let mock = MockGitHubService::demo().with_repos_page(ProviderPage {
+        items: Vec::new(),
+        next: Some("3".to_owned()),
+        prev: Some("1".to_owned()),
+    });
+    let response = request(mock.clone(), "/v1/github/owners/octocat/repos?limit=10").await;
+    let link = response.headers()[header::LINK]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let next = relation(&link, "next").unwrap();
+    let prev = relation(&link, "prev").unwrap();
+    for target in [&next, &prev] {
+        assert!(target.starts_with("/v1/github/owners/octocat/repos?limit=10&cursor="));
+        assert!(!target.contains("api.github"));
+    }
+    let _: Value = read_json_body(response).await;
+    assert_eq!(request(mock.clone(), &next).await.status(), StatusCode::OK);
+    assert_eq!(request(mock.clone(), &prev).await.status(), StatusCode::OK);
+    let calls = mock.calls();
+    assert_eq!(calls[1].pagination, Some(GitHubPagination::Numbered(3)));
+    assert_eq!(calls[2].pagination, Some(GitHubPagination::Numbered(1)));
+}
+
+#[tokio::test]
+async fn github_activity_navigation_maps_direction_to_after_or_before() {
+    let scope = CursorScope {
+        operation: "listGitHubRepositoryActivity",
+        owner: Some("octocat"),
+        repository: Some("repo"),
+        limit: 20,
+        category: None,
+    };
+    for direction in [CursorDirection::Next, CursorDirection::Prev] {
+        let cursor = Cursor::new(&scope, direction, "provider-token").encode();
+        let mock = MockGitHubService::demo();
+        assert_eq!(
+            request(
+                mock.clone(),
+                &format!("/v1/github/repos/octocat/repo/activity?cursor={cursor}")
             )
             .await
-            .expect("request should succeed");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("application/problem+json")
+            .status(),
+            StatusCode::OK
         );
-        let problem: ProblemDetails = read_json_body(response).await;
-        assert_eq!(problem.status, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(
+            mock.calls()[0].pagination,
+            Some(GitHubPagination::Activity {
+                direction,
+                value: "provider-token".to_owned()
+            })
+        );
     }
 }
 
 #[tokio::test]
-async fn github_path_validation_accepts_internal_hyphens() {
-    let service =
-        GitHubService::mock(MockGitHubService::demo().with_error(GitHubServiceError::NotFound));
-    let response = build_app(test_state_with_github_service(service))
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v1/github/owners/octo-cat")
-                .body(Body::empty())
-                .expect("request should build"),
+async fn github_rejects_provider_navigation_that_cannot_fit_a_public_cursor() {
+    let mock = MockGitHubService::demo().with_activity_page(ProviderPage {
+        items: Vec::new(),
+        next: Some("x".repeat(2_048)),
+        prev: None,
+    });
+    let response = request(
+        mock.clone(),
+        "/v1/github/repos/octocat/repo/activity?limit=100",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(response.headers().get(header::LINK).is_none());
+    let problem: ProblemDetails = read_json_body(response).await;
+    assert_eq!(problem.code, ProblemCode::GithubUpstream);
+    assert_eq!(mock.call_count(), 1);
+}
+
+#[tokio::test]
+async fn github_cursors_bind_operation_resource_limit_direction_and_value() {
+    let scope = CursorScope {
+        operation: "listGitHubOwnerRepositories",
+        owner: Some("octocat"),
+        repository: None,
+        limit: 20,
+        category: None,
+    };
+    let valid = Cursor::new(&scope, CursorDirection::Next, "2").encode();
+    let mock = MockGitHubService::demo();
+    assert_eq!(
+        request(
+            mock.clone(),
+            &format!("/v1/github/owners/octocat/repos?cursor={valid}")
         )
         .await
-        .expect("request should succeed");
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(mock.call_count(), 1);
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let wrong = [
+        Cursor::new(
+            &CursorScope {
+                operation: "listGitHubRepositoryTags",
+                ..scope
+            },
+            CursorDirection::Next,
+            "2",
+        )
+        .encode(),
+        Cursor::new(
+            &CursorScope {
+                owner: Some("other"),
+                ..scope
+            },
+            CursorDirection::Next,
+            "2",
+        )
+        .encode(),
+        Cursor::new(
+            &CursorScope { limit: 10, ..scope },
+            CursorDirection::Next,
+            "2",
+        )
+        .encode(),
+        Cursor::new(&scope, CursorDirection::Next, "1").encode(),
+        Cursor::new(&scope, CursorDirection::Next, "01").encode(),
+        Cursor::new(&scope, CursorDirection::Next, "9007199254740992").encode(),
+    ];
+    for cursor in wrong {
+        let mock = MockGitHubService::demo();
+        assert_problem(
+            mock.clone(),
+            &format!("/v1/github/owners/octocat/repos?cursor={cursor}"),
+            StatusCode::BAD_REQUEST,
+            ProblemCode::InvalidRequest,
+        )
+        .await;
+        assert_eq!(mock.call_count(), 0);
+    }
+    let oversized = format!(
+        "/v1/github/owners/octocat/repos?cursor={}",
+        "x".repeat(2049)
+    );
+    let mock = MockGitHubService::demo();
+    assert_problem(
+        mock.clone(),
+        &oversized,
+        StatusCode::BAD_REQUEST,
+        ProblemCode::InvalidRequest,
+    )
+    .await;
+    assert_eq!(mock.call_count(), 0);
 }
 
 #[tokio::test]
-async fn github_error_mapping_covers_not_found_forbidden_rate_limit_and_upstream() {
-    let not_found = build_app(test_state_with_github_service(GitHubService::mock(
-        MockGitHubService::demo().with_error(GitHubServiceError::NotFound),
-    )))
-    .oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/v1/github/owners/octocat")
-            .body(Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should succeed");
-    assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
-
-    let forbidden = build_app(test_state_with_github_service(GitHubService::mock(
-        MockGitHubService::demo().with_error(GitHubServiceError::Forbidden),
-    )))
-    .oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/v1/github/owners/octocat")
-            .body(Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should succeed");
-    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-
-    let invalid_request = build_app(test_state_with_github_service(GitHubService::mock(
-        MockGitHubService::demo().with_error(GitHubServiceError::Upstream(
-            GitHubUpstreamError::new(GitHubUpstreamErrorKind::InvalidRequest, 422, None, None),
-        )),
-    )))
-    .oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/v1/github/owners/octocat")
-            .body(Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should succeed");
-    assert_eq!(invalid_request.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let rate_limited = build_app(test_state_with_github_service(GitHubService::mock(
-        MockGitHubService::demo().with_error(GitHubServiceError::Upstream(
-            GitHubUpstreamError::new(
-                GitHubUpstreamErrorKind::RateLimited,
-                403,
-                Some("60".to_owned()),
-                Some("1700000000".to_owned()),
-            ),
-        )),
-    )))
-    .oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/v1/github/owners/octocat")
-            .body(Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should succeed");
-    assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(
-        rate_limited
-            .headers()
-            .get(header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok()),
-        Some("60")
-    );
-    assert_eq!(
-        rate_limited
-            .headers()
-            .get("x-ratelimit-reset")
-            .and_then(|value| value.to_str().ok()),
-        Some("1700000000")
-    );
-
-    let upstream = build_app(test_state_with_github_service(GitHubService::mock(
-        MockGitHubService::demo().with_error(GitHubServiceError::Upstream(
-            GitHubUpstreamError::new(GitHubUpstreamErrorKind::Upstream, 500, None, None),
-        )),
-    )))
-    .oneshot(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/v1/github/owners/octocat")
-            .body(Body::empty())
-            .expect("request should build"),
-    )
-    .await
-    .expect("request should succeed");
-    assert_eq!(upstream.status(), StatusCode::BAD_GATEWAY);
-
-    let problem: ProblemDetails = read_json_body(upstream).await;
-    assert_eq!(problem.status, StatusCode::BAD_GATEWAY.as_u16());
-}
-
-#[tokio::test]
-async fn openapi_includes_github_paths() {
-    let response = build_app(test_state())
+async fn github_local_negotiation_and_method_rejections_do_not_fetch_or_consume_body() {
+    let mock = MockGitHubService::demo();
+    let app = build_app(state_with(
+        MockAuthVerifier::test_user(),
+        mock.clone(),
+        MockProfileService::default(),
+    ));
+    let unacceptable = app
+        .clone()
         .oneshot(
             Request::builder()
-                .method(Method::GET)
-                .uri("/v1/openapi")
+                .uri("/v1/github/owners/octocat")
+                .header(header::ACCEPT, "text/html")
                 .body(Body::empty())
-                .expect("request should build"),
+                .unwrap(),
         )
         .await
-        .expect("request should succeed");
+        .unwrap();
+    assert_eq!(unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
+    assert_eq!(mock.call_count(), 0);
 
-    let document: serde_json::Value = read_json_body(response).await;
-    assert!(document["paths"].get("/v1/github/owners/{owner}").is_some());
-    assert!(
-        document["paths"]
-            .get("/v1/github/repos/{owner}/{repo}/tags")
-            .is_some()
+    let body = Body::from_stream(stream::once(async {
+        panic!("GitHub GET polled request content");
+        #[allow(unreachable_code)]
+        Ok::<Bytes, Infallible>(Bytes::new())
+    }));
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/github/owners/octocat")
+                    .body(body)
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
     );
-    for path in [
-        "/v1/github/owners/{owner}",
-        "/v1/github/owners/{owner}/repos",
-        "/v1/github/repos/{owner}/{repo}",
-        "/v1/github/repos/{owner}/{repo}/activity",
-        "/v1/github/repos/{owner}/{repo}/languages",
-        "/v1/github/repos/{owner}/{repo}/tags",
-    ] {
-        let operation = &document["paths"][path]["get"];
-        assert_eq!(
-            operation["responses"]["422"]["$ref"],
-            "#/components/responses/ProblemResponse"
-        );
+
+    let method = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/github/owners/octocat")
+                .body(Body::from(vec![0; 1_000_001]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(method.headers()[header::ALLOW], "GET");
+    assert_eq!(mock.call_count(), 1);
+}
+
+#[tokio::test]
+async fn github_service_errors_map_to_exact_public_codes_and_quota_headers() {
+    let cases = [
+        (
+            GitHubServiceError::NotFound,
+            StatusCode::NOT_FOUND,
+            ProblemCode::GithubNotFound,
+        ),
+        (
+            GitHubServiceError::Timeout,
+            StatusCode::GATEWAY_TIMEOUT,
+            ProblemCode::GithubTimeout,
+        ),
+    ];
+    for (error, status, code) in cases {
+        assert_problem(
+            MockGitHubService::demo().with_error(error),
+            "/v1/github/owners/octocat",
+            status,
+            code,
+        )
+        .await;
     }
-    for path in [
-        "/v1/github/owners/{owner}/repos",
-        "/v1/github/repos/{owner}/{repo}/tags",
-    ] {
-        let operation = &document["paths"][path]["get"];
-        let parameter_names = operation["parameters"]
-            .as_array()
-            .expect("parameters should be an array")
-            .iter()
-            .filter_map(|parameter| parameter["name"].as_str())
-            .collect::<Vec<_>>();
-        assert!(parameter_names.contains(&"cursor"));
-        assert!(parameter_names.contains(&"limit"));
-        assert_eq!(
-            operation["responses"]["200"]["headers"]["Link"]["schema"]["type"],
-            "string"
-        );
-    }
-    assert_eq!(
-        document["components"]["schemas"]["Activity"]["properties"]["actor"]["type"],
-        serde_json::json!(["string", "null"])
-    );
-    assert_eq!(
-        document["components"]["schemas"]["Activity"]["properties"]["actorAvatarUrl"]["type"],
-        serde_json::json!(["string", "null"])
-    );
-    assert_eq!(
-        document["components"]["schemas"]["Activity"]["properties"]["timestamp"]["format"],
-        "date-time"
-    );
-    assert_eq!(
-        document["components"]["schemas"]["Owner"]["properties"]["createdAt"]["format"],
-        "date-time"
-    );
-    assert!(
-        document["components"]["responses"]["ProblemResponse"]["content"]
-            .get("application/problem+json")
-            .is_some()
-    );
-    assert!(
-        document["components"]["responses"]["ProblemResponse"]["content"]
-            .get("application/cbor")
-            .is_some()
-    );
+    assert_problem(
+        MockGitHubService::demo().with_upstream_error(GitHubUpstreamErrorKind::Schema),
+        "/v1/github/owners/octocat",
+        StatusCode::BAD_GATEWAY,
+        ProblemCode::GithubUpstream,
+    )
+    .await;
+
+    let rate =
+        MockGitHubService::demo().with_error(GitHubServiceError::RateLimited(GitHubRateLimit {
+            retry_after: "17".to_owned(),
+            rate_limit_reset: Some("9007199254740991".to_owned()),
+        }));
+    let response = request(rate, "/v1/github/owners/octocat").await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "17");
+    assert_eq!(response.headers()["x-ratelimit-reset"], "9007199254740991");
+    let problem: ProblemDetails = read_json_body(response).await;
+    assert_eq!(problem.code, ProblemCode::GithubRateLimit);
 }
