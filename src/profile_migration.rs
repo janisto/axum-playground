@@ -4,7 +4,9 @@ use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{
-    FirestoreDb, FirestoreDocument, FirestoreWritePrecondition, timestamp_utils::from_timestamp,
+    FirestoreDb, FirestoreDocument, FirestoreWritePrecondition,
+    errors::{BackoffError, FirestoreError},
+    timestamp_utils::from_timestamp,
 };
 use futures_util::StreamExt;
 use gcloud_sdk::{google::firestore::v1::value::ValueType, prost_types::Timestamp};
@@ -15,7 +17,7 @@ use crate::{
     AppConfig,
     services::profile::{
         CANONICAL_PROFILE_FIELDS, PROFILES_COLLECTION, Profile, new_firestore_db,
-        profile_document_id, validate_stored_profile,
+        profile_document_id, transaction_firestore_error, validate_stored_profile,
     },
     validation::{canonical_clock_timestamp, normalize_contact_email, normalize_phone_number},
 };
@@ -388,21 +390,26 @@ async fn migrate_one(
                 .select()
                 .by_id_in(PROFILES_COLLECTION)
                 .one(&target.document_id)
-                .await?;
+                .await
+                .map_err(transaction_firestore_error)?;
             let Some(current) = current else {
                 return Ok(TransactionOutcome::ConcurrentChange);
             };
             match migration_decision(&current, &target) {
-                MigrationDecision::AlreadyCurrent => Ok(TransactionOutcome::AlreadyCurrent),
+                MigrationDecision::AlreadyCurrent => {
+                    Ok::<_, BackoffError<FirestoreError>>(TransactionOutcome::AlreadyCurrent)
+                }
                 MigrationDecision::Migrate(profile) => {
-                    let update_time = from_timestamp(target.update_time)?;
+                    let update_time =
+                        from_timestamp(target.update_time).map_err(transaction_firestore_error)?;
                     db.fluent()
                         .update()
                         .in_col(PROFILES_COLLECTION)
                         .precondition(FirestoreWritePrecondition::UpdateTime(update_time))
                         .document_id(&target.document_id)
                         .object(&profile)
-                        .add_to_transaction(transaction)?;
+                        .add_to_transaction(transaction)
+                        .map_err(transaction_firestore_error)?;
                     Ok(TransactionOutcome::Migrated)
                 }
                 MigrationDecision::ConcurrentChange => Ok(TransactionOutcome::ConcurrentChange),

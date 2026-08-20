@@ -11,7 +11,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{
     FirestoreDb, FirestoreDbOptions, FirestoreDocument, FirestoreWritePrecondition,
-    errors::FirestoreError,
+    errors::{BackoffError, FirestoreError},
 };
 use gcloud_sdk::{ExternalJwtFunctionSource, Token, TokenSourceType};
 use serde::{Deserialize, Serialize};
@@ -492,7 +492,8 @@ impl FirestoreProfileStore {
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
                         .one(&document_id)
-                        .await?;
+                        .await
+                        .map_err(transaction_firestore_error)?;
                     if existing.is_some() {
                         return Ok(TransactionOutcome::Exists);
                     }
@@ -502,8 +503,9 @@ impl FirestoreProfileStore {
                         .precondition(FirestoreWritePrecondition::Exists(false))
                         .document_id(&document_id)
                         .object(&profile)
-                        .add_to_transaction(transaction)?;
-                    Ok(TransactionOutcome::Profile(profile))
+                        .add_to_transaction(transaction)
+                        .map_err(transaction_firestore_error)?;
+                    Ok::<_, BackoffError<FirestoreError>>(TransactionOutcome::Profile(profile))
                 })
             })
             .await
@@ -549,7 +551,8 @@ impl FirestoreProfileStore {
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
                         .one(&document_id)
-                        .await?;
+                        .await
+                        .map_err(transaction_firestore_error)?;
                     let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
                     };
@@ -574,8 +577,9 @@ impl FirestoreProfileStore {
                         .precondition(FirestoreWritePrecondition::Exists(true))
                         .document_id(&document_id)
                         .object(&updated)
-                        .add_to_transaction(transaction)?;
-                    Ok(TransactionOutcome::Profile(updated))
+                        .add_to_transaction(transaction)
+                        .map_err(transaction_firestore_error)?;
+                    Ok::<_, BackoffError<FirestoreError>>(TransactionOutcome::Profile(updated))
                 })
             })
             .await
@@ -597,7 +601,8 @@ impl FirestoreProfileStore {
                         .select()
                         .by_id_in(PROFILES_COLLECTION)
                         .one(&document_id)
-                        .await?;
+                        .await
+                        .map_err(transaction_firestore_error)?;
                     let Some(current) = current else {
                         return Ok(TransactionOutcome::NotFound);
                     };
@@ -616,8 +621,9 @@ impl FirestoreProfileStore {
                         .from(PROFILES_COLLECTION)
                         .document_id(&document_id)
                         .precondition(FirestoreWritePrecondition::Exists(true))
-                        .add_to_transaction(transaction)?;
-                    Ok(TransactionOutcome::Deleted)
+                        .add_to_transaction(transaction)
+                        .map_err(transaction_firestore_error)?;
+                    Ok::<_, BackoffError<FirestoreError>>(TransactionOutcome::Deleted)
                 })
             })
             .await
@@ -796,11 +802,22 @@ fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> Pr
     }
 }
 
+pub(crate) fn transaction_firestore_error(error: FirestoreError) -> BackoffError<FirestoreError> {
+    if matches!(&error, FirestoreError::DatabaseError(value) if value.retry_possible) {
+        BackoffError::transient(error)
+    } else {
+        BackoffError::permanent(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error as _, sync::Arc};
 
-    use firestore::{FirestoreDb, errors::FirestoreError};
+    use firestore::{
+        FirestoreDb,
+        errors::{BackoffError, FirestoreError},
+    };
     use gcloud_sdk::tonic::Status;
     use time::macros::datetime;
 
@@ -808,8 +825,8 @@ mod tests {
         CreateProfileParams, MockProfileService, Profile, ProfileBackendError, ProfileOperation,
         ProfileServiceError, TransactionOutcome, UpdateProfileParams, create_transaction_result,
         decode_stored_profile, decode_transaction_profile, delete_transaction_result,
-        map_firestore_error, profile_document_id, update_transaction_result,
-        validate_stored_profile,
+        map_firestore_error, profile_document_id, transaction_firestore_error,
+        update_transaction_result, validate_stored_profile,
     };
 
     fn create_params(first_name: &str) -> CreateProfileParams {
@@ -967,6 +984,16 @@ mod tests {
 
     #[test]
     fn firestore_error_mapping_preserves_retry_and_operation_semantics() {
+        assert!(matches!(
+            transaction_firestore_error(FirestoreError::from(Status::unavailable("transient"))),
+            BackoffError::Transient { .. }
+        ));
+        assert!(matches!(
+            transaction_firestore_error(FirestoreError::from(Status::invalid_argument(
+                "permanent"
+            ))),
+            BackoffError::Permanent(_)
+        ));
         assert!(matches!(
             map_firestore_error(
                 FirestoreError::from(Status::unavailable("transient")),
