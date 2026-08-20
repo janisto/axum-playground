@@ -472,6 +472,12 @@ fn classify_canonical(document: &FirestoreDocument, document_id: &str) -> Classi
 }
 
 fn classify_legacy(document: &FirestoreDocument, document_id: &str) -> Classification {
+    let Some(timestamps_in_order) = legacy_timestamps_in_order(document) else {
+        return Classification::Blocked(ProfileMigrationReason::InvalidFieldType);
+    };
+    if !timestamps_in_order {
+        return Classification::Blocked(ProfileMigrationReason::InvalidValue);
+    }
     let Some(profile) = profile_from_fields(document, true) else {
         return Classification::Blocked(ProfileMigrationReason::InvalidFieldType);
     };
@@ -563,6 +569,12 @@ fn normalize_legacy_timestamp(value: &str) -> Option<String> {
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .and_then(canonical_clock_timestamp)
+}
+
+fn legacy_timestamps_in_order(document: &FirestoreDocument) -> Option<bool> {
+    let created_at = OffsetDateTime::parse(string_field(document, "createdAt")?, &Rfc3339).ok()?;
+    let updated_at = OffsetDateTime::parse(string_field(document, "updatedAt")?, &Rfc3339).ok()?;
+    Some(created_at <= updated_at)
 }
 
 fn document_id(document: &FirestoreDocument) -> Option<String> {
@@ -827,6 +839,54 @@ mod tests {
             classify_document(&document).classification,
             Classification::Current
         ));
+    }
+
+    #[test]
+    fn legacy_timestamp_order_is_checked_before_precision_reduction() {
+        let mut invalid = legacy_document();
+        invalid.fields.insert(
+            "createdAt".to_owned(),
+            gcloud_sdk::google::firestore::v1::Value {
+                value_type: Some(ValueType::StringValue(
+                    "2026-07-30T12:00:00.0009Z".to_owned(),
+                )),
+            },
+        );
+        invalid.fields.insert(
+            "updatedAt".to_owned(),
+            gcloud_sdk::google::firestore::v1::Value {
+                value_type: Some(ValueType::StringValue(
+                    "2026-07-30T12:00:00.0001Z".to_owned(),
+                )),
+            },
+        );
+        assert!(matches!(
+            classify_document(&invalid).classification,
+            Classification::Blocked(ProfileMigrationReason::InvalidValue)
+        ));
+
+        let mut valid = invalid;
+        valid.fields.insert(
+            "createdAt".to_owned(),
+            gcloud_sdk::google::firestore::v1::Value {
+                value_type: Some(ValueType::StringValue(
+                    "2026-07-30T12:00:00.0001Z".to_owned(),
+                )),
+            },
+        );
+        valid.fields.insert(
+            "updatedAt".to_owned(),
+            gcloud_sdk::google::firestore::v1::Value {
+                value_type: Some(ValueType::StringValue(
+                    "2026-07-30T12:00:00.0009Z".to_owned(),
+                )),
+            },
+        );
+        let Classification::Legacy(profile) = classify_document(&valid).classification else {
+            panic!("ordered legacy timestamps should remain migratable");
+        };
+        assert_eq!(profile.created_at, "2026-07-30T12:00:00.000Z");
+        assert_eq!(profile.updated_at, "2026-07-30T12:00:00.000Z");
     }
 
     #[test]

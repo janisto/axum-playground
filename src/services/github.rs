@@ -1346,7 +1346,8 @@ fn validate_provider_link(
             let page = exact_navigation_query(&query, &request.request_query, &["page"])?
                 .and_then(|(_, value)| canonical_integer(value, SAFE_INTEGER_MAX))
                 .ok_or_else(|| upstream(GitHubUpstreamErrorKind::Pagination))?;
-            if (relation == "next" && (empty_page || page <= *current || page == 1))
+            if page == 0
+                || (relation == "next" && (empty_page || page <= *current || page == 1))
                 || (relation == "prev" && page >= *current)
             {
                 return Err(upstream(GitHubUpstreamErrorKind::Pagination));
@@ -3119,6 +3120,22 @@ mod tests {
 
     #[tokio::test]
     async fn status_mapping_is_exact_and_quota_hints_apply_only_to_403_or_429() {
+        let forbidden = response(
+            StatusCode::FORBIDDEN,
+            json!({"message": "secondary limit details must not be read"}),
+        );
+        let reads = Arc::clone(&forbidden.body_reads);
+        assert!(matches!(
+            HttpGitHubService::with_mock(MockGitHubTransport::new(vec![forbidden]))
+                .get_owner("octocat")
+                .await,
+            Err(GitHubServiceError::RateLimited(GitHubRateLimit {
+                retry_after,
+                rate_limit_reset: None
+            })) if retry_after == "60"
+        ));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+
         for status in [StatusCode::FORBIDDEN, StatusCode::TOO_MANY_REQUESTS] {
             let mut quota = response(status, json!({"provider_secret": true}));
             let reads = Arc::clone(&quota.body_reads);
@@ -3276,6 +3293,7 @@ mod tests {
             "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=3>; rel=\"next next\"",
             "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=3>; rel=next, </user/1/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=4>; rel=next",
             "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=2>; rel=next",
+            "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=0>; rel=prev",
             "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=19&page=3>; rel=next",
             "</repositories/1/repos?type=owner&sort=full_name&direction=asc&per_page=20&page=3>; rel=next",
             "</users/octocat/repos?type=owner&sort=full_name&direction=asc&per_page=20>; rel=next",

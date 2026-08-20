@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use axum::{
-    extract::{FromRequestParts, Path},
+    extract::{FromRequestParts, Path, rejection::PathRejection},
     http::request::Parts,
     response::Response,
 };
@@ -27,7 +27,13 @@ where
         Path::<T>::from_request_parts(parts, state)
             .await
             .map(|Path(value)| Self(value))
-            .map_err(|_| problem_response(ProblemCode::NotFound, &headers))
+            .map_err(|rejection| {
+                let code = match rejection {
+                    PathRejection::FailedToDeserializePathParams(_) => ProblemCode::InvalidRequest,
+                    _ => ProblemCode::NotFound,
+                };
+                problem_response(code, &headers)
+            })
     }
 }
 

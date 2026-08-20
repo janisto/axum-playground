@@ -269,6 +269,26 @@ async fn github_path_validation_covers_exact_boundaries_without_fetching() {
         );
         assert_eq!(mock.call_count(), 0, "{target}");
     }
+
+    for target in [
+        "/v1/github/owners/%FF",
+        "/v1/github/owners/%FF/repos",
+        "/v1/github/repos/%FF/repo",
+        "/v1/github/repos/owner/%FF",
+        "/v1/github/repos/owner/%FF/activity",
+        "/v1/github/repos/owner/%FF/languages",
+        "/v1/github/repos/owner/%FF/tags",
+    ] {
+        let mock = MockGitHubService::demo();
+        assert_problem(
+            mock.clone(),
+            target,
+            StatusCode::BAD_REQUEST,
+            ProblemCode::InvalidRequest,
+        )
+        .await;
+        assert_eq!(mock.call_count(), 0, "{target}");
+    }
 }
 
 #[tokio::test]
