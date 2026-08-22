@@ -360,9 +360,10 @@ impl<'de> Visitor<'de> for StrictJsonVisitor {
 fn has_duplicate_cbor_key(value: &ciborium::Value) -> bool {
     match value {
         ciborium::Value::Map(entries) => {
-            let duplicate = entries.iter().enumerate().any(|(index, (key, _))| {
-                entries[..index].iter().any(|(previous, _)| previous == key)
-            });
+            let mut keys = BTreeSet::<ciborium::value::CanonicalValue>::new();
+            let duplicate = entries
+                .iter()
+                .any(|(key, _)| !keys.insert(key.clone().into()));
             duplicate
                 || entries.iter().any(|(key, value)| {
                     has_duplicate_cbor_key(key) || has_duplicate_cbor_key(value)
@@ -383,8 +384,8 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        Representation, RequestBodyDecodeError, StrictJsonVisitor, decode_request_body,
-        has_duplicate_cbor_key, parse_content_type,
+        MAX_REQUEST_BODY_SIZE_BYTES, Representation, RequestBodyDecodeError, StrictJsonVisitor,
+        decode_request_body, has_duplicate_cbor_key, parse_content_type,
     };
 
     #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -511,5 +512,35 @@ mod tests {
         assert!(!has_duplicate_cbor_key(&ciborium::Value::Array(vec![
             ciborium::Value::Text("unique".to_owned())
         ])));
+    }
+
+    #[test]
+    fn large_cbor_maps_do_not_require_pairwise_duplicate_scans() {
+        const ENTRY_COUNT: u64 = 16_384;
+
+        let mut entries = (0..ENTRY_COUNT)
+            .map(|key| (ciborium::Value::Integer(key.into()), ciborium::Value::Null))
+            .collect::<Vec<_>>();
+        let unique = ciborium::Value::Map(entries.clone());
+        assert!(!has_duplicate_cbor_key(&unique));
+
+        let mut body = Vec::new();
+        ciborium::into_writer(&unique, &mut body).expect("CBOR map");
+        assert!(body.len() < MAX_REQUEST_BODY_SIZE_BYTES);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/cbor"),
+        );
+        assert_eq!(
+            decode_request_body::<Payload>(&headers, Bytes::from(body)),
+            Err(RequestBodyDecodeError::Validation)
+        );
+
+        entries.push((
+            ciborium::Value::Integer((ENTRY_COUNT - 1).into()),
+            ciborium::Value::Bool(true),
+        ));
+        assert!(has_duplicate_cbor_key(&ciborium::Value::Map(entries)));
     }
 }

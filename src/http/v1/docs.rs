@@ -82,7 +82,7 @@ pub fn ui_router() -> Router<Arc<AppState>> {
     )
 }
 
-pub async fn openapi_handler(format: JsonResponseFormat, _query: NoQuery) -> Response {
+async fn openapi_handler(format: JsonResponseFormat, _query: NoQuery) -> Response {
     json_success_response(StatusCode::OK, format, &openapi_document())
 }
 
