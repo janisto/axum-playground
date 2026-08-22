@@ -1,6 +1,6 @@
 //! One-time migration from the retired profile persistence shape.
 
-use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future, sync::Arc, time::Duration};
 
 use firestore::{
     FirestoreDb, FirestoreDocument, FirestoreWritePrecondition,
@@ -31,6 +31,7 @@ const LEGACY_FIELDS: [&str; 9] = [
     "terms",
     "updatedAt",
 ];
+const MIGRATION_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileMigrationMode {
@@ -262,11 +263,14 @@ pub async fn run_profile_migration(
         ));
     }
 
-    let db = new_firestore_db(project_id, config.firestore_emulator_host.as_deref())
-        .await
-        .map_err(|error| {
-            migration_error_with_source(ProfileMigrationErrorKind::Initialize, None, error)
-        })?;
+    let db = with_migration_deadline(ProfileMigrationErrorKind::Initialize, async {
+        new_firestore_db(project_id, config.firestore_emulator_host.as_deref())
+            .await
+            .map_err(|error| {
+                migration_error_with_source(ProfileMigrationErrorKind::Initialize, None, error)
+            })
+    })
+    .await?;
     run_profile_migration_with_store(project_id, &mode, &FirestoreMigrationStore { db: &db }).await
 }
 
@@ -300,8 +304,7 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
     mode: &ProfileMigrationMode,
     store: &S,
 ) -> Result<ProfileMigrationReport, ProfileMigrationError> {
-    let classified = store
-        .load()
+    let classified = with_migration_deadline(ProfileMigrationErrorKind::Read, store.load())
         .await
         .map_err(|error| error.with_report(None))?;
     let mut report = report_for(project_id, &classified, 0);
@@ -317,10 +320,10 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
     };
 
     for target in targets {
-        let outcome = store
-            .migrate(&target)
-            .await
-            .map_err(|error| error.with_report(Some(report.clone())))?;
+        let outcome =
+            with_migration_deadline(ProfileMigrationErrorKind::Write, store.migrate(&target))
+                .await
+                .map_err(|error| error.with_report(Some(report.clone())))?;
         match outcome {
             TransactionOutcome::Migrated => report.migrated += 1,
             TransactionOutcome::AlreadyCurrent => {}
@@ -333,12 +336,14 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
         }
     }
 
-    let verified = store.load().await.map_err(|error| {
-        error.reclassify(
-            ProfileMigrationErrorKind::Verification,
-            Some(report.clone()),
-        )
-    })?;
+    let verified = with_migration_deadline(ProfileMigrationErrorKind::Verification, store.load())
+        .await
+        .map_err(|error| {
+            error.reclassify(
+                ProfileMigrationErrorKind::Verification,
+                Some(report.clone()),
+            )
+        })?;
     let mut verified_report = report_for(project_id, &verified, report.migrated);
     if verified
         .iter()
@@ -351,6 +356,16 @@ async fn run_profile_migration_with_store<S: MigrationStore>(
         ));
     }
     Ok(verified_report)
+}
+
+async fn with_migration_deadline<T>(
+    kind: ProfileMigrationErrorKind,
+    future: impl Future<Output = Result<T, ProfileMigrationError>>,
+) -> Result<T, ProfileMigrationError> {
+    match tokio::time::timeout(MIGRATION_DEPENDENCY_TIMEOUT, future).await {
+        Ok(result) => result,
+        Err(error) => Err(migration_error_with_source(kind, None, error)),
+    }
 }
 
 async fn load_classified(db: &FirestoreDb) -> Result<Vec<ClassifiedRecord>, ProfileMigrationError> {
@@ -1105,6 +1120,30 @@ mod tests {
             "private verification sentinel",
             true,
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn migration_dependency_deadline_is_exact_and_preserves_error_kind() {
+        for kind in [
+            ProfileMigrationErrorKind::Initialize,
+            ProfileMigrationErrorKind::Read,
+            ProfileMigrationErrorKind::Write,
+            ProfileMigrationErrorKind::Verification,
+        ] {
+            let started = tokio::time::Instant::now();
+            let error = with_migration_deadline(
+                kind,
+                std::future::pending::<Result<(), ProfileMigrationError>>(),
+            )
+            .await
+            .expect_err("stalled dependency step should expire");
+            assert_eq!(started.elapsed(), MIGRATION_DEPENDENCY_TIMEOUT);
+            assert_eq!(error.kind(), kind);
+            assert!(error.report().is_none());
+            assert!(error.source().is_some());
+            assert!(!error.to_string().contains("deadline"));
+            assert!(!format!("{error:?}").contains("deadline"));
+        }
     }
 
     fn assert_migration_source(

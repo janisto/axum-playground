@@ -541,7 +541,7 @@ async fn served_document_dereferences_exact_portable_schema_shapes() {
     assert!(
         property(&document, profile, "contactEmail")["pattern"]
             .as_str()
-            .is_some_and(|pattern| pattern.contains("@[a-z0-9]"))
+            .is_some_and(|pattern| pattern.contains('`') && pattern.contains("@[a-z0-9]"))
     );
 
     let issue = &document["components"]["schemas"]["ProblemIssue"];
@@ -990,7 +990,9 @@ fn assert_input_contact_schemas(document: &Value, schema: &Value) {
     assert_eq!(email["type"], "string");
     assert!(email.get("maxLength").is_none());
     assert!(email["pattern"].as_str().is_some_and(|pattern| {
-        pattern.starts_with("^[\\t-\\r ]*") && pattern.ends_with("[\\t-\\r ]*$")
+        pattern.starts_with("^[\\t-\\r ]*")
+            && pattern.contains('`')
+            && pattern.ends_with("[\\t-\\r ]*$")
     }));
     assert_eq!(phone["type"], "string");
     assert!(phone.get("maxLength").is_none());

@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 use crate::common::{read_cbor_body, read_json_body, state_with, test_state};
 
-const CREATE: &str = r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":" Ada.Lovelace@EXAMPLE.COM\t","phoneNumber":" +358401234567 ","termsAccepted":true}"#;
+const CREATE: &str = r#"{"firstName":"Ada","lastName":"Lovelace","contactEmail":" Ada`Lovelace@EXAMPLE.COM\t","phoneNumber":" +358401234567 ","termsAccepted":true}"#;
 const BODY_LIMIT: usize = 1_000_000;
 
 fn authorized(method: Method, body: impl Into<Body>) -> Request<Body> {
@@ -84,7 +84,7 @@ async fn profile_crud_normalizes_contacts_and_enforces_timestamp_lifecycle() {
             id: "user-123".to_owned(),
             first_name: "Ada".to_owned(),
             last_name: "Lovelace".to_owned(),
-            contact_email: "Ada.Lovelace@example.com".to_owned(),
+            contact_email: "Ada`Lovelace@example.com".to_owned(),
             phone_number: "+358401234567".to_owned(),
             marketing_opt_in: false,
             terms_accepted: true,
@@ -115,7 +115,7 @@ async fn profile_crud_normalizes_contacts_and_enforces_timestamp_lifecycle() {
         .clone()
         .oneshot(authorized_json(
             Method::PATCH,
-            r#"{"contactEmail":"Ada.Lovelace@EXAMPLE.COM","marketingOptIn":false}"#,
+            r#"{"contactEmail":"Ada`Lovelace@EXAMPLE.COM","marketingOptIn":false}"#,
         ))
         .await
         .unwrap();

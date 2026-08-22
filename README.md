@@ -353,7 +353,10 @@ cargo run --locked --bin migrate_profiles -- \
 Each target is re-read in a Firestore transaction and fully replaced with the
 canonical object. A changed or newly invalid target stops the run; records
 already migrated are recognized as current, so the command is safe to rerun.
-A final audit must find only current records.
+A final audit must find only current records. Firestore client initialization,
+each complete audit or verification scan, and each per-target transaction have
+an independent 30-second deadline. If a transaction times out, treat its commit
+outcome as unknown and rerun the audit before resuming apply.
 
 This migration and the new runtime form one atomic operational cutover. Build
 the new revision without serving it, stop old profile writers and traffic,
