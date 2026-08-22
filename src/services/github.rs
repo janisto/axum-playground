@@ -1340,6 +1340,9 @@ fn validate_provider_link(
         .join(target)
         .map_err(|_| upstream(GitHubUpstreamErrorKind::Pagination))?;
     validate_common_target(&target, base, request, GitHubUpstreamErrorKind::Pagination)?;
+    if current_url.path() != request.named_path && target.path() != current_url.path() {
+        return Err(upstream(GitHubUpstreamErrorKind::Pagination));
+    }
     let query = strict_query(target.query())?;
     match &request.navigation {
         NavigationKind::None => Err(upstream(GitHubUpstreamErrorKind::Pagination)),
@@ -3276,6 +3279,54 @@ mod tests {
         assert_eq!(result.next.as_deref(), Some("4"));
         assert_eq!(result.prev.as_deref(), Some("1"));
         assert_eq!(transport.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_links_pin_the_terminal_numeric_resource_identity() {
+        let query = "type=owner&sort=full_name&direction=asc&per_page=20";
+        for (target_id, accepted) in [(1, true), (2, false)] {
+            let mut page = response(StatusCode::OK, json!([repository_summary_json(1, "repo")]));
+            page.headers.insert(
+                header::LINK,
+                HeaderValue::from_str(&format!(
+                    "</user/{target_id}/repos?{query}&page=2>; rel=next"
+                ))
+                .expect("link"),
+            );
+            let transport = MockGitHubTransport::new(vec![
+                redirect_response(StatusCode::FOUND, Some(&format!("/user/1/repos?{query}"))),
+                page,
+            ]);
+            let result = HttpGitHubService::with_mock(transport.clone())
+                .list_repositories("octocat", 20, None)
+                .await;
+            if accepted {
+                assert_eq!(
+                    result.expect("same-identity provider link").next.as_deref(),
+                    Some("2")
+                );
+            } else {
+                assert_upstream(result, GitHubUpstreamErrorKind::Pagination);
+            }
+            assert_eq!(transport.requests.lock().expect("requests").len(), 2);
+        }
+
+        let mut page = response(StatusCode::OK, json!([tag_json("v1")]));
+        page.headers.insert(
+            header::LINK,
+            HeaderValue::from_static("</repositories/2/tags?per_page=20&page=2>; rel=next"),
+        );
+        let transport = MockGitHubTransport::new(vec![
+            redirect_response(StatusCode::FOUND, Some("/repositories/1/tags?per_page=20")),
+            page,
+        ]);
+        assert_upstream(
+            HttpGitHubService::with_mock(transport.clone())
+                .list_tags("octocat", "repo", 20, None)
+                .await,
+            GitHubUpstreamErrorKind::Pagination,
+        );
+        assert_eq!(transport.requests.lock().expect("requests").len(), 2);
     }
 
     #[tokio::test]
