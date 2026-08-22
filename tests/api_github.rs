@@ -507,6 +507,22 @@ async fn github_local_negotiation_and_method_rejections_do_not_fetch_or_consume_
     assert_eq!(unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
     assert_eq!(mock.call_count(), 0);
 
+    let quoted_quality = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/github/owners/octocat")
+                .header(header::ACCEPT, "application/cbor;q=\"1\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(quoted_quality.status(), StatusCode::NOT_ACCEPTABLE);
+    let problem: ProblemDetails = read_json_body(quoted_quality).await;
+    assert_eq!(problem.code, ProblemCode::NotAcceptable);
+    assert_eq!(mock.call_count(), 0);
+
     let body = Body::from_stream(stream::once(async {
         panic!("GitHub GET polled request content");
         #[allow(unreachable_code)]

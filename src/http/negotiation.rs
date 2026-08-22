@@ -199,15 +199,17 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
         if !valid_token(&name) || !names.insert(name.clone()) {
             return None;
         }
-        let value = decode_parameter(raw_value.trim())?;
         if name == "q" {
             if quality_seen {
                 return None;
             }
-            quality = parse_quality(&value)?;
+            quality = parse_quality(raw_value.trim())?;
             quality_seen = true;
-        } else if !quality_seen {
-            media_parameters.push((name, value));
+        } else {
+            let value = decode_parameter(raw_value.trim())?;
+            if !quality_seen {
+                media_parameters.push((name, value));
+            }
         }
     }
 
@@ -445,6 +447,7 @@ mod tests {
             "application/json;charset=utf-8;charset=UTF-8",
             "application/json;bad name=value",
             "application/json;name",
+            "application/cbor;q=\"1\"",
             "application/json;name=\"unterminated",
             "application/json;name=\"trailing\\\"",
         ] {
