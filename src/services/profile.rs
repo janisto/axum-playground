@@ -862,7 +862,9 @@ fn map_firestore_error(error: FirestoreError, operation: ProfileOperation) -> Pr
 }
 
 pub(crate) fn transaction_firestore_error(error: FirestoreError) -> BackoffError<FirestoreError> {
-    if matches!(&error, FirestoreError::DatabaseError(value) if value.retry_possible) {
+    if matches!(&error, FirestoreError::NetworkError(_))
+        || matches!(&error, FirestoreError::DatabaseError(value) if value.retry_possible)
+    {
         BackoffError::transient(error)
     } else {
         BackoffError::permanent(error)
@@ -880,7 +882,9 @@ mod tests {
 
     use firestore::{
         FirestoreDb,
-        errors::{BackoffError, FirestoreError},
+        errors::{
+            BackoffError, FirestoreError, FirestoreErrorPublicGenericDetails, FirestoreNetworkError,
+        },
     };
     use gcloud_sdk::tonic::Status;
     use time::macros::datetime;
@@ -1068,6 +1072,13 @@ mod tests {
     fn firestore_error_mapping_preserves_retry_and_operation_semantics() {
         assert!(matches!(
             transaction_firestore_error(FirestoreError::from(Status::unavailable("transient"))),
+            BackoffError::Transient { .. }
+        ));
+        assert!(matches!(
+            transaction_firestore_error(FirestoreError::NetworkError(FirestoreNetworkError::new(
+                FirestoreErrorPublicGenericDetails::new("NETWORK".to_owned()),
+                "transient network failure".to_owned(),
+            ),)),
             BackoffError::Transient { .. }
         ));
         assert!(matches!(

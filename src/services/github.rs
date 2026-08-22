@@ -2409,6 +2409,8 @@ mod tests {
             "https://example.test/pa\rth",
             "https://example.test/a b",
             "https://example.test/%zz",
+            "https://token@example.test/path",
+            "https://:secret@example.test/path",
             "https://example.test/café",
             "https://例え.test/path",
         ] {
@@ -2461,11 +2463,12 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_preprocessed_url_text_in_every_public_shape() {
+    fn projection_rejects_unsafe_url_text_in_every_public_shape() {
         for invalid in [
             " https://example.test/path",
             "https://example.test/pa\nth",
             "https://example.test/a b",
+            "https://token@example.test/path",
             "https://example.test/café",
             "https://例え.test/path",
         ] {

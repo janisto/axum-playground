@@ -2,7 +2,6 @@
 
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use firestore::{
     FirestoreDb, FirestoreDocument, FirestoreWritePrecondition,
     errors::{BackoffError, FirestoreError},
@@ -10,7 +9,6 @@ use firestore::{
 };
 use futures_util::StreamExt;
 use gcloud_sdk::{google::firestore::v1::value::ValueType, prost_types::Timestamp};
-use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
@@ -82,7 +80,6 @@ impl fmt::Display for ProfileMigrationReason {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileMigrationRecord {
-    pub fingerprint: String,
     pub status: ProfileMigrationStatus,
     pub reason: ProfileMigrationReason,
 }
@@ -623,20 +620,11 @@ fn report_for(
                     ),
                     Classification::Blocked(reason) => (ProfileMigrationStatus::Blocked, *reason),
                 };
-                ProfileMigrationRecord {
-                    fingerprint: fingerprint(&record.document_id),
-                    status,
-                    reason,
-                }
+                ProfileMigrationRecord { status, reason }
             })
             .collect(),
         migrated,
     }
-}
-
-fn fingerprint(document_id: &str) -> String {
-    let digest = Sha256::digest(format!("{PROFILES_COLLECTION}/{document_id}"));
-    format!("sha256:{}", URL_SAFE_NO_PAD.encode(&digest[..18]))
 }
 
 fn migration_error(
@@ -947,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_selects_only_legacy_records_and_reports_only_hashes() {
+    fn preflight_selects_only_legacy_records_and_reports_no_identifiers() {
         let legacy = classify_document(&legacy_document());
         let current = classify_document(&canonical_document());
         let targets = preflight_targets(&[legacy, current]).expect("preflight");
@@ -960,15 +948,16 @@ mod tests {
         );
 
         let report = report_for("test", &[classify_document(&legacy_document())], 0);
-        assert!(!report.records[0].fingerprint.contains("user-123"));
-        assert!(!report.records[0].fingerprint.contains("uid_"));
         assert_eq!(report.migration_required(), 1);
         assert_eq!(report.blocked(), 0);
         assert_eq!(report.current(), 0);
-        assert!(report.records[0].fingerprint.starts_with("sha256:"));
-        assert_eq!(report.records[0].fingerprint.len(), 31);
-        assert_eq!(fingerprint("same"), fingerprint("same"));
-        assert_ne!(fingerprint("same"), fingerprint("different"));
+        assert_eq!(
+            report.records,
+            [ProfileMigrationRecord {
+                status: ProfileMigrationStatus::MigrationRequired,
+                reason: ProfileMigrationReason::LegacyProfile,
+            }]
+        );
     }
 
     #[test]
@@ -1009,9 +998,7 @@ mod tests {
             project_id: "test".to_owned(),
             records: statuses
                 .into_iter()
-                .enumerate()
-                .map(|(index, (status, _))| ProfileMigrationRecord {
-                    fingerprint: format!("fingerprint-{index}"),
+                .map(|(status, _)| ProfileMigrationRecord {
                     status,
                     reason: ProfileMigrationReason::CanonicalProfile,
                 })

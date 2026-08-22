@@ -63,7 +63,7 @@ fn parse_mode(args: &[String]) -> Result<Option<ProfileMigrationMode>, ()> {
 }
 
 fn render_report(report: &ProfileMigrationReport) -> String {
-    let mut lines = vec![format!(
+    format!(
         "profile_migration project={} total={} current={} migration_required={} blocked={} migrated={}",
         report.project_id,
         report.records.len(),
@@ -71,14 +71,7 @@ fn render_report(report: &ProfileMigrationReport) -> String {
         report.migration_required(),
         report.blocked(),
         report.migrated,
-    )];
-    lines.extend(report.records.iter().map(|record| {
-        format!(
-            "profile_record fingerprint={} status={} reason={}",
-            record.fingerprint, record.status, record.reason
-        )
-    }));
-    lines.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -128,17 +121,14 @@ mod tests {
             project_id: "demo-project".to_owned(),
             records: vec![
                 ProfileMigrationRecord {
-                    fingerprint: "sha256:current".to_owned(),
                     status: ProfileMigrationStatus::Current,
                     reason: ProfileMigrationReason::CanonicalProfile,
                 },
                 ProfileMigrationRecord {
-                    fingerprint: "sha256:legacy".to_owned(),
                     status: ProfileMigrationStatus::MigrationRequired,
                     reason: ProfileMigrationReason::LegacyProfile,
                 },
                 ProfileMigrationRecord {
-                    fingerprint: "sha256:blocked".to_owned(),
                     status: ProfileMigrationStatus::Blocked,
                     reason: ProfileMigrationReason::UnexpectedShape,
                 },
@@ -147,10 +137,7 @@ mod tests {
         };
         assert_eq!(
             render_report(&report),
-            "profile_migration project=demo-project total=3 current=1 migration_required=1 blocked=1 migrated=1\
-\nprofile_record fingerprint=sha256:current status=current reason=canonical_profile\
-\nprofile_record fingerprint=sha256:legacy status=migration_required reason=legacy_profile\
-\nprofile_record fingerprint=sha256:blocked status=blocked reason=unexpected_shape"
+            "profile_migration project=demo-project total=3 current=1 migration_required=1 blocked=1 migrated=1"
         );
     }
 }

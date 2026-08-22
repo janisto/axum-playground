@@ -337,7 +337,7 @@ cargo run --locked --bin migrate_profiles -- --audit
 It classifies only the exact retired shape, the exact current shape, or a
 blocked record. It validates document ownership and every canonical value,
 normalizes legacy contact fields, converts legacy clock timestamps to UTC
-milliseconds, and reports record identifiers only as SHA-256 fingerprints.
+milliseconds, and reports only aggregate record counts without per-record identifiers.
 Any mixed, unknown, wrongly typed, invalid, or document-ID-mismatched record
 blocks the complete apply preflight before the first write.
 
