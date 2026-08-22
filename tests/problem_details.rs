@@ -1,102 +1,218 @@
 mod common;
 
-use axum::{
-    body::Body,
-    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum_playground::problem::{
+    ProblemCode, ProblemDetails, ProblemIssue, ProblemSource, problem_response,
 };
-use axum_playground::{build_app, problem::ProblemDetails};
-use tower::ServiceExt;
+use serde_json::Value;
 
-use common::{read_cbor_body, read_json_body, test_state};
+use crate::common::{read_cbor_body, read_json_body};
 
 #[tokio::test]
-async fn problem_details_default_to_json_and_include_relative_schema_link() {
-    let headers = HeaderMap::new();
-
-    let response = ProblemDetails::new(404, "Not Found")
-        .with_detail("missing resource")
-        .into_response(&headers);
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        response.headers().get(header::CONTENT_TYPE),
-        Some(&HeaderValue::from_static("application/problem+json"))
-    );
-    assert_eq!(
-        response.headers().get(header::LINK),
-        Some(&HeaderValue::from_static(
-            "</schemas/ErrorModel.json>; rel=\"describedby\""
-        ))
-    );
-
-    let vary_values = response
-        .headers()
-        .get_all(header::VARY)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>();
-    assert_eq!(vary_values, vec!["Origin", "Accept"]);
-
-    let problem: ProblemDetails = read_json_body(response).await;
-    assert_eq!(problem.title.as_deref(), Some("Not Found"));
-    assert_eq!(problem.detail.as_deref(), Some("missing resource"));
+async fn every_problem_code_has_the_exact_status_title_detail_and_wire_name() {
+    let taxonomy = [
+        (
+            ProblemCode::InvalidRequest,
+            400,
+            "Bad Request",
+            "Request is malformed",
+            "invalid_request",
+        ),
+        (
+            ProblemCode::Unauthorized,
+            401,
+            "Unauthorized",
+            "Authentication is required or invalid",
+            "unauthorized",
+        ),
+        (
+            ProblemCode::Forbidden,
+            403,
+            "Forbidden",
+            "Access is forbidden",
+            "forbidden",
+        ),
+        (
+            ProblemCode::ClientGeneratedIdUnsupported,
+            403,
+            "Forbidden",
+            "Client-generated profile IDs are not supported",
+            "client_generated_id_unsupported",
+        ),
+        (
+            ProblemCode::RelationshipsUnsupported,
+            403,
+            "Forbidden",
+            "Profile relationships are not supported",
+            "relationships_unsupported",
+        ),
+        (
+            ProblemCode::NotFound,
+            404,
+            "Not Found",
+            "Resource not found",
+            "not_found",
+        ),
+        (
+            ProblemCode::ProfileNotFound,
+            404,
+            "Not Found",
+            "Profile not found",
+            "profile_not_found",
+        ),
+        (
+            ProblemCode::GithubNotFound,
+            404,
+            "Not Found",
+            "GitHub resource not found",
+            "github_not_found",
+        ),
+        (
+            ProblemCode::MethodNotAllowed,
+            405,
+            "Method Not Allowed",
+            "Method not allowed",
+            "method_not_allowed",
+        ),
+        (
+            ProblemCode::NotAcceptable,
+            406,
+            "Not Acceptable",
+            "No acceptable response representation is available",
+            "not_acceptable",
+        ),
+        (
+            ProblemCode::ProfileExists,
+            409,
+            "Conflict",
+            "Profile already exists",
+            "profile_exists",
+        ),
+        (
+            ProblemCode::ProfileResourceMismatch,
+            409,
+            "Conflict",
+            "Profile resource does not match this endpoint",
+            "profile_resource_mismatch",
+        ),
+        (
+            ProblemCode::PayloadTooLarge,
+            413,
+            "Content Too Large",
+            "Request body is too large",
+            "payload_too_large",
+        ),
+        (
+            ProblemCode::UnsupportedMediaType,
+            415,
+            "Unsupported Media Type",
+            "Request representation is not supported",
+            "unsupported_media_type",
+        ),
+        (
+            ProblemCode::ValidationFailed,
+            422,
+            "Unprocessable Content",
+            "Request validation failed",
+            "validation_failed",
+        ),
+        (
+            ProblemCode::RateLimited,
+            429,
+            "Too Many Requests",
+            "Rate limit exceeded",
+            "rate_limited",
+        ),
+        (
+            ProblemCode::GithubRateLimit,
+            429,
+            "Too Many Requests",
+            "GitHub rate limit exceeded",
+            "github_rate_limit",
+        ),
+        (
+            ProblemCode::InternalError,
+            500,
+            "Internal Server Error",
+            "Internal server error",
+            "internal_error",
+        ),
+        (
+            ProblemCode::GithubUpstream,
+            502,
+            "Bad Gateway",
+            "GitHub upstream response is invalid or unavailable",
+            "github_upstream",
+        ),
+        (
+            ProblemCode::DependencyUnavailable,
+            503,
+            "Service Unavailable",
+            "A required dependency is unavailable",
+            "dependency_unavailable",
+        ),
+        (
+            ProblemCode::GithubTimeout,
+            504,
+            "Gateway Timeout",
+            "GitHub request timed out",
+            "github_timeout",
+        ),
+    ];
+    for (code, status, title, detail, wire_code) in taxonomy {
+        let response = problem_response(code, &HeaderMap::new());
+        assert_eq!(response.status(), StatusCode::from_u16(status).unwrap());
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        let value: Value = read_json_body(response).await;
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "title": title, "status": status, "detail": detail, "code": wire_code
+            })
+        );
+    }
 }
 
 #[tokio::test]
-async fn problem_details_use_cbor_when_accept_prefers_cbor() {
+async fn problem_negotiation_prefers_cbor_only_when_acceptable_and_never_changes_status() {
     let mut headers = HeaderMap::new();
     headers.insert(header::ACCEPT, HeaderValue::from_static("application/cbor"));
-
-    let response = ProblemDetails::new(400, "Bad Request").into_response(&headers);
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = problem_response(ProblemCode::PayloadTooLarge, &headers);
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/cbor");
     assert_eq!(
-        response.headers().get(header::CONTENT_TYPE),
-        Some(&HeaderValue::from_static("application/cbor"))
+        read_cbor_body::<ProblemDetails>(response).await.code,
+        ProblemCode::PayloadTooLarge
     );
 
-    let problem: ProblemDetails = read_cbor_body(response).await;
-    assert_eq!(problem.title.as_deref(), Some("Bad Request"));
+    headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+    let response = problem_response(ProblemCode::PayloadTooLarge, &headers);
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
 }
 
-#[tokio::test]
-async fn advertised_error_schema_link_resolves_to_json_schema() {
-    let response = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .uri("/schemas/ErrorModel.json")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("application/schema+json")
-    );
-    let schema: serde_json::Value = read_json_body(response).await;
-    assert_eq!(
-        schema["$schema"],
-        "https://json-schema.org/draft/2020-12/schema"
-    );
-    assert_eq!(schema["required"], serde_json::json!(["status"]));
-
-    let openapi = build_app(test_state())
-        .oneshot(
-            Request::builder()
-                .uri("/v1/openapi")
-                .body(Body::empty())
-                .expect("request should build"),
-        )
-        .await
-        .expect("request should succeed");
-    let document: serde_json::Value = read_json_body(openapi).await;
-    let status = &document["components"]["schemas"]["ProblemDetails"]["properties"]["status"];
-    assert_eq!(status["minimum"], 100);
-    assert_eq!(status["maximum"], 599);
+#[test]
+fn problem_issue_truncation_is_bounded_and_uses_the_exact_omission_marker() {
+    let issues = (0..40)
+        .map(|index| ProblemIssue {
+            detail: format!("safe issue {index}"),
+            source: Some(ProblemSource {
+                pointer: Some("/known".to_owned()),
+                parameter: None,
+                header: None,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let problem = ProblemDetails::new(ProblemCode::ValidationFailed).with_errors(issues);
+    let errors = problem.errors.expect("issues should be retained");
+    assert_eq!(errors.len(), 32);
+    assert_eq!(errors[30].detail, "safe issue 30");
+    assert_eq!(errors[31].detail, "Additional validation errors omitted");
+    assert!(errors[31].source.is_none());
 }

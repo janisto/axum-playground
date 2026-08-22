@@ -8,6 +8,17 @@ pub fn observability_config() -> ObservabilityConfig {
     ObservabilityConfig::default()
         .with_field_convention(FieldConvention::Gcp)
         .with_trace_context_level(TraceContextLevel::Level1)
+        .with_request_id_validator(valid_portable_request_id)
+}
+
+fn valid_portable_request_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .skip(1)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 pub fn init_tracing(app_environment: AppEnvironment) -> Result<(), StartupError> {
@@ -35,7 +46,7 @@ mod tests {
 
     use crate::config::AppEnvironment;
 
-    use super::{default_filter, observability_config};
+    use super::{default_filter, observability_config, valid_portable_request_id};
 
     #[test]
     fn production_uses_less_verbose_default_filter() {
@@ -59,5 +70,18 @@ mod tests {
             observability_config().trace_context_level(),
             TraceContextLevel::Level1
         );
+    }
+
+    #[test]
+    fn request_id_validator_uses_the_portable_grammar() {
+        assert!(valid_portable_request_id("A"));
+        assert!(valid_portable_request_id(&format!(
+            "A{}",
+            "._:-".repeat(31)
+        )));
+        for invalid in ["", "-bad", "bad id", "bad/id", "bad,id", "é"] {
+            assert!(!valid_portable_request_id(invalid));
+        }
+        assert!(!valid_portable_request_id(&"x".repeat(129)));
     }
 }

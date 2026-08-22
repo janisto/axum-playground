@@ -1,7 +1,10 @@
 pub mod cursor;
 pub mod link;
 
-use crate::pagination::{cursor::Cursor, link::build_link_header};
+use crate::pagination::{
+    cursor::{Cursor, CursorDirection, CursorScope, InvalidCursor},
+    link::build_link_header,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageResult<T> {
@@ -13,165 +16,185 @@ pub struct PageResult<T> {
 }
 
 #[must_use]
-pub fn resolve_limit(limit: Option<i64>, default: usize, maximum: usize) -> Option<usize> {
-    match limit {
+pub fn resolve_limit(value: Option<&str>, default: u16, maximum: u16) -> Option<u16> {
+    match value {
         None => Some(default),
-        Some(limit) => usize::try_from(limit)
-            .ok()
-            .filter(|limit| (1..=maximum).contains(limit)),
+        Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            value
+                .parse::<u16>()
+                .ok()
+                .filter(|value| (1..=maximum).contains(value))
+        }
+        Some(_) => None,
     }
 }
 
 pub fn paginate<T, F>(
     items: &[T],
-    cursor: &Cursor,
-    limit: usize,
-    cursor_kind: &str,
+    cursor: Option<&Cursor>,
+    scope: &CursorScope<'_>,
     get_id: F,
     base_url: &str,
     query_pairs: &[(String, String)],
-) -> PageResult<T>
+) -> Result<PageResult<T>, InvalidCursor>
 where
     T: Clone,
     F: Fn(&T) -> &str,
 {
+    let limit = usize::from(scope.limit);
     let total = items.len();
-
-    let start_index = if cursor.value.is_empty() {
-        0
-    } else {
-        items
-            .iter()
-            .position(|item| get_id(item) == cursor.value)
-            .map(|index| index + 1)
-            .unwrap_or(0)
-    };
-    let end_index = start_index.saturating_add(limit).min(total);
-    let page_items = items[start_index..end_index].to_vec();
-
-    let next_cursor = if end_index < total && !page_items.is_empty() {
-        page_items
-            .last()
-            .map(|item| Cursor::new(cursor_kind, get_id(item)).encode())
-    } else {
-        None
-    };
-
-    let prev_cursor = if start_index > 0 {
-        if start_index <= limit {
-            Some(Cursor::new(cursor_kind, "").encode())
-        } else {
-            let prev_last_index = start_index - 1;
-            Some(Cursor::new(cursor_kind, get_id(&items[prev_last_index - limit])).encode())
+    let start = match cursor {
+        None => 0,
+        Some(cursor) if !cursor.belongs_to(scope) => return Err(InvalidCursor),
+        Some(cursor) => {
+            let anchor = items
+                .iter()
+                .position(|item| get_id(item) == cursor.value)
+                .ok_or(InvalidCursor)?;
+            match cursor.direction {
+                CursorDirection::Next => anchor + 1,
+                CursorDirection::Prev => anchor.saturating_sub(limit),
+            }
         }
-    } else {
-        None
     };
+    let end = start.saturating_add(limit).min(total);
+    let page_items = items[start..end].to_vec();
+
+    let next_cursor = (end < total)
+        .then(|| page_items.last())
+        .flatten()
+        .map(|item| Cursor::new(scope, CursorDirection::Next, get_id(item)).encode());
+    let prev_cursor = (start > 0)
+        .then(|| page_items.first())
+        .flatten()
+        .map(|item| Cursor::new(scope, CursorDirection::Prev, get_id(item)).encode());
 
     let mut owned_query = query_pairs.to_vec();
-    owned_query.retain(|(key, _)| key != "limit");
-    owned_query.push(("limit".to_owned(), limit.to_string()));
-
+    owned_query.retain(|(key, _)| key != "limit" && key != "cursor");
+    owned_query.push(("limit".to_owned(), scope.limit.to_string()));
     let borrowed_query = owned_query
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
+    let link_header = build_link_header(
+        base_url,
+        &borrowed_query,
+        next_cursor.as_deref(),
+        prev_cursor.as_deref(),
+    );
 
-    PageResult {
+    Ok(PageResult {
         items: page_items,
         total,
-        link_header: build_link_header(
-            base_url,
-            &borrowed_query,
-            next_cursor.as_deref(),
-            prev_cursor.as_deref(),
-        ),
+        link_header,
         next_cursor,
         prev_cursor,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{paginate, resolve_limit};
-    use crate::pagination::cursor::Cursor;
+    use crate::pagination::cursor::{Cursor, CursorDirection, CursorScope};
 
-    #[test]
-    fn paginate_matches_prev_and_next_cursor_contract() {
-        let items = (1..=30)
-            .map(|index| format!("item-{index:03}"))
-            .collect::<Vec<_>>();
-        let cursor = Cursor::new("item", "item-010");
-
-        let page = paginate(
-            &items,
-            &cursor,
-            5,
-            "item",
-            |item| item.as_str(),
-            "/v1/items",
-            &[],
-        );
-
-        assert_eq!(
-            page.items.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["item-011", "item-012", "item-013", "item-014", "item-015"]
-        );
-        assert_eq!(
-            page.next_cursor,
-            Some(Cursor::new("item", "item-015").encode())
-        );
-        assert_eq!(
-            page.prev_cursor,
-            Some(Cursor::new("item", "item-005").encode())
-        );
-        assert!(page.link_header.contains("rel=\"next\""));
-        assert!(page.link_header.contains("rel=\"prev\""));
+    fn scope(limit: u16) -> CursorScope<'static> {
+        CursorScope {
+            operation: "listItems",
+            owner: None,
+            repository: None,
+            limit,
+            category: None,
+        }
     }
 
     #[test]
-    fn paginate_handles_first_and_terminal_page_boundaries() {
-        let items = (1..=6)
-            .map(|index| format!("item-{index:03}"))
-            .collect::<Vec<_>>();
-
-        let first = paginate(
+    fn three_pages_traverse_forward_and_backward_without_skips() {
+        let items = (1..=7).map(|n| format!("item-{n}")).collect::<Vec<_>>();
+        let first =
+            paginate(&items, None, &scope(3), String::as_str, "/v1/items", &[]).expect("first");
+        let second_cursor =
+            super::cursor::decode_cursor(first.next_cursor.as_deref().unwrap()).expect("next");
+        let second = paginate(
             &items,
-            &Cursor::new("", ""),
-            3,
-            "item",
-            |item| item.as_str(),
+            Some(&second_cursor),
+            &scope(3),
+            String::as_str,
             "/v1/items",
             &[],
-        );
-        assert_eq!(first.items, items[..3]);
-        assert_eq!(first.prev_cursor, None);
+        )
+        .expect("second");
+        let third_cursor =
+            super::cursor::decode_cursor(second.next_cursor.as_deref().unwrap()).expect("next");
+        let third = paginate(
+            &items,
+            Some(&third_cursor),
+            &scope(3),
+            String::as_str,
+            "/v1/items",
+            &[],
+        )
+        .expect("third");
+        assert_eq!(first.items, items[0..3]);
+        assert_eq!(second.items, items[3..6]);
+        assert_eq!(third.items, items[6..7]);
+
+        let back =
+            super::cursor::decode_cursor(third.prev_cursor.as_deref().unwrap()).expect("prev");
+        assert_eq!(back.direction, CursorDirection::Prev);
         assert_eq!(
-            first.next_cursor,
-            Some(Cursor::new("item", "item-003").encode())
+            paginate(
+                &items,
+                Some(&back),
+                &scope(3),
+                String::as_str,
+                "/v1/items",
+                &[]
+            )
+            .expect("back")
+            .items,
+            second.items
         );
-
-        let terminal = paginate(
-            &items,
-            &Cursor::new("item", "item-003"),
-            3,
-            "item",
-            |item| item.as_str(),
-            "/v1/items",
-            &[],
-        );
-        assert_eq!(terminal.items, items[3..]);
-        assert_eq!(terminal.next_cursor, None);
-        assert_eq!(terminal.prev_cursor, Some(Cursor::new("item", "").encode()));
     }
 
     #[test]
-    fn limit_resolution_accepts_only_the_documented_range() {
+    fn stale_and_changed_scope_cursors_fail() {
+        let items = vec!["a".to_owned(), "b".to_owned()];
+        let stale = Cursor::new(&scope(1), CursorDirection::Next, "missing");
+        assert!(paginate(&items, Some(&stale), &scope(1), String::as_str, "/x", &[]).is_err());
+        let changed = Cursor::new(&scope(2), CursorDirection::Next, "a");
+        assert!(paginate(&items, Some(&changed), &scope(1), String::as_str, "/x", &[]).is_err());
+    }
+
+    #[test]
+    fn limit_resolution_uses_exact_decimal_syntax_and_range() {
         assert_eq!(resolve_limit(None, 20, 100), Some(20));
-        assert_eq!(resolve_limit(Some(1), 20, 100), Some(1));
-        assert_eq!(resolve_limit(Some(100), 20, 100), Some(100));
-        assert_eq!(resolve_limit(Some(0), 20, 100), None);
-        assert_eq!(resolve_limit(Some(-1), 20, 100), None);
-        assert_eq!(resolve_limit(Some(101), 20, 100), None);
+        assert_eq!(resolve_limit(Some("1"), 20, 100), Some(1));
+        assert_eq!(resolve_limit(Some("100"), 20, 100), Some(100));
+        for value in ["", "+1", " 1", "1.0", "0", "101", "999999999999"] {
+            assert_eq!(resolve_limit(Some(value), 20, 100), None);
+        }
+    }
+
+    #[test]
+    fn pagination_replaces_transport_parameters_and_preserves_filters() {
+        let page = paginate(
+            &["a".to_owned(), "b".to_owned()],
+            None,
+            &scope(1),
+            String::as_str,
+            "/v1/items",
+            &[
+                ("limit".to_owned(), "99".to_owned()),
+                ("cursor".to_owned(), "stale".to_owned()),
+                ("category".to_owned(), "tools".to_owned()),
+            ],
+        )
+        .expect("first page");
+        assert_eq!(page.link_header.matches("limit=").count(), 1);
+        assert_eq!(page.link_header.matches("cursor=").count(), 1);
+        assert!(page.link_header.contains("limit=1"));
+        assert!(page.link_header.contains("category=tools"));
+        assert!(!page.link_header.contains("limit=99"));
+        assert!(!page.link_header.contains("cursor=stale"));
     }
 }

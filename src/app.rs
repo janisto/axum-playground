@@ -4,72 +4,30 @@ use axum::{
     Router,
     body::Body,
     extract::Request,
-    http::{HeaderName, Method, StatusCode, header},
+    http::{HeaderValue, Method, header},
     middleware::{Next, from_fn},
     response::Response,
+    routing::{MethodFilter, on},
 };
 use axum_observability::ObservabilityLayer;
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    limit::RequestBodyLimitLayer,
-};
 
 use crate::{
-    http::{health, v1},
-    middleware::{
-        recover::panic_recovery_middleware, security::security_headers_middleware,
-        timeout::timeout_middleware,
-    },
-    problem::problem_response,
+    http::{codec::MAX_REQUEST_BODY_SIZE_BYTES, health, v1},
+    middleware::{recover::panic_recovery_middleware, security::security_headers_middleware},
+    problem::{ProblemCode, problem_response},
     state::AppState,
     telemetry::observability_config,
 };
-
-const MAX_REQUEST_BODY_SIZE_BYTES: usize = 1024 * 1024;
 
 pub fn build_app(state: Arc<AppState>) -> Router {
     build_app_with_routes(state, Router::new())
 }
 
 pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppState>>) -> Router {
-    let cors_layer = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::HEAD,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            header::ACCEPT,
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            HeaderName::from_static("x-csrf-token"),
-            HeaderName::from_static("x-request-id"),
-            HeaderName::from_static("traceparent"),
-            HeaderName::from_static("tracestate"),
-        ])
-        .expose_headers([
-            header::ALLOW,
-            header::LINK,
-            header::LOCATION,
-            header::RETRY_AFTER,
-            header::WWW_AUTHENTICATE,
-            HeaderName::from_static("x-ratelimit-reset"),
-            HeaderName::from_static("x-request-id"),
-        ])
-        .max_age(std::time::Duration::from_secs(300));
-
     Router::new()
-        .route("/health", axum::routing::get(health::health_handler))
-        .route(
-            "/schemas/ErrorModel.json",
-            axum::routing::get(crate::http::schema::error_model_schema_handler),
-        )
+        .route("/health", on(MethodFilter::GET, health::health_handler))
+        .merge(v1::docs::router())
         .merge(v1::docs::ui_router())
         .nest("/v1", v1::router())
         .merge(extra_routes)
@@ -80,11 +38,9 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
                 .layer(ObservabilityLayer::new(observability_config()))
                 .layer(from_fn(empty_head_response_body))
                 .layer(from_fn(security_headers_middleware))
-                .layer(cors_layer)
                 .layer(from_fn(panic_recovery_middleware))
-                .layer(from_fn(timeout_middleware))
-                .layer(from_fn(payload_too_large_problem_middleware))
-                .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE_BYTES)),
+                .layer(from_fn(portable_head_rejection_middleware))
+                .layer(from_fn(declared_body_size_middleware)),
         )
         .with_state(state)
 }
@@ -100,38 +56,149 @@ async fn empty_head_response_body(request: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::empty())
 }
 
-async fn payload_too_large_problem_middleware(request: Request, next: Next) -> Response {
-    let request_headers = request.headers().clone();
-    let response = next.run(request).await;
-    let has_problem_content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| matches!(value, "application/problem+json" | "application/cbor"));
-
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE && !has_problem_content_type {
-        problem_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request body is too large",
-            &request_headers,
-        )
-    } else {
-        response
+async fn portable_head_rejection_middleware(request: Request, next: Next) -> Response {
+    if request.method() == Method::HEAD && portable_allow(request.uri().path()).is_some() {
+        return method_not_allowed_handler(request).await;
     }
+    next.run(request).await
+}
+
+async fn declared_body_size_middleware(request: Request, next: Next) -> Response {
+    if is_portable_body_operation(request.method(), request.uri().path()) {
+        let values = request
+            .headers()
+            .get_all(header::CONTENT_LENGTH)
+            .iter()
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            let valid = (values.len() == 1).then(|| values[0]).and_then(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+                    .and_then(|value| value.parse::<u64>().ok())
+            });
+            let Some(length) = valid else {
+                return problem_response(ProblemCode::InvalidRequest, request.headers());
+            };
+            if length > MAX_REQUEST_BODY_SIZE_BYTES as u64 {
+                return problem_response(ProblemCode::PayloadTooLarge, request.headers());
+            }
+        }
+    }
+    next.run(request).await
+}
+
+fn is_portable_body_operation(method: &Method, path: &str) -> bool {
+    matches!(
+        (method, path),
+        (&Method::POST, "/v1/hello" | "/v1/profile") | (&Method::PATCH, "/v1/profile")
+    )
 }
 
 async fn not_found_handler(request: Request) -> Response {
-    problem_response(
-        StatusCode::NOT_FOUND,
-        "resource not found",
-        request.headers(),
-    )
+    problem_response(ProblemCode::NotFound, request.headers())
 }
 
 async fn method_not_allowed_handler(request: Request) -> Response {
-    problem_response(
-        StatusCode::METHOD_NOT_ALLOWED,
-        format!("method {} not allowed", request.method()),
-        request.headers(),
-    )
+    let mut response = problem_response(ProblemCode::MethodNotAllowed, request.headers());
+    if let Some(allowed) = portable_allow(request.uri().path()) {
+        response.headers_mut().insert(header::ALLOW, allowed);
+    }
+    response
+}
+
+fn portable_allow(path: &str) -> Option<HeaderValue> {
+    let value = match path {
+        "/health" | "/v1/items" | "/openapi.json" => "GET",
+        "/v1/hello" => "GET, POST",
+        "/v1/profile" => "GET, POST, PATCH, DELETE",
+        path if is_github_path(path) => "GET",
+        _ => return None,
+    };
+    Some(HeaderValue::from_static(value))
+}
+
+fn is_github_path(path: &str) -> bool {
+    let Some(path) = path.strip_prefix('/') else {
+        return false;
+    };
+    let segments = path.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["v1", "github", "owners", owner] => !owner.is_empty(),
+        ["v1", "github", "owners", _, "repos"]
+        | [
+            "v1",
+            "github",
+            "repos",
+            _,
+            _,
+            "activity" | "languages" | "tags",
+        ] => true,
+        ["v1", "github", "repos", _, repository] => !repository.is_empty(),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{Method, header};
+
+    use super::{is_github_path, is_portable_body_operation, portable_allow};
+
+    #[test]
+    fn limit_applies_only_after_a_supported_body_operation_is_selected() {
+        assert!(is_portable_body_operation(&Method::POST, "/v1/hello"));
+        assert!(is_portable_body_operation(&Method::POST, "/v1/profile"));
+        assert!(is_portable_body_operation(&Method::PATCH, "/v1/profile"));
+        assert!(!is_portable_body_operation(&Method::GET, "/v1/hello"));
+        assert!(!is_portable_body_operation(&Method::PUT, "/v1/profile"));
+        assert!(!is_portable_body_operation(&Method::POST, "/missing"));
+    }
+
+    #[test]
+    fn allow_values_apply_only_to_exact_portable_path_shapes() {
+        for path in [
+            "/v1/github/owners/octocat",
+            "/v1/github/owners/octocat/repos",
+            "/v1/github/repos/octocat/hello-world",
+            "/v1/github/repos/octocat/hello-world/activity",
+            "/v1/github/repos/octocat/hello-world/languages",
+            "/v1/github/repos/octocat/hello-world/tags",
+        ] {
+            assert!(is_github_path(path), "expected GitHub path: {path}");
+            assert_eq!(
+                portable_allow(path),
+                Some(header::HeaderValue::from_static("GET"))
+            );
+        }
+
+        for path in [
+            "v1/github/owners/octocat",
+            "//v1/github/owners/octocat",
+            "/missing",
+            "/v1/github",
+            "/v1/github/owners",
+            "/v1/github/owners/",
+            "/v1/github/owners/octocat/extra",
+            "/v1/github/repos/octocat",
+            "/v1/github/repos/octocat/",
+            "/v1/github/repos/octocat/hello-world/extra",
+        ] {
+            assert!(!is_github_path(path), "unexpected GitHub path: {path}");
+            assert_eq!(portable_allow(path), None);
+        }
+
+        for path in [
+            "/v1/github/owners//repos",
+            "/v1/github/repos//hello-world",
+            "/v1/github/repos/octocat//tags",
+        ] {
+            assert!(is_github_path(path), "expected registered shape: {path}");
+            assert_eq!(
+                portable_allow(path),
+                Some(header::HeaderValue::from_static("GET"))
+            );
+        }
+    }
 }

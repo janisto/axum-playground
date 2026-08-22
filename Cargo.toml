@@ -15,20 +15,18 @@ firestore = { version = "0.50.0", default-features = false, features = ["tls-web
 futures-util = "0.3.33"
 gcloud-sdk = { version = "0.30.2", default-features = false }
 google-cloud-auth = "1.14.0"
-jsonwebtoken = "11.0.0"
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
-time = { version = "0.3.54", features = ["formatting", "parsing", "serde"] }
-tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+time = { version = "0.3.54", features = ["formatting", "macros", "parsing", "serde"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.7.0", features = ["cors", "limit"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 utoipa = "5.5.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
-validator = "0.21.0"
 
 [profile.mutants]
 inherits = "test"

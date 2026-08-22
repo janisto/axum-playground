@@ -12,7 +12,6 @@ use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .merge(docs::router())
         .merge(github::router())
         .merge(hello::router())
         .merge(items::router())

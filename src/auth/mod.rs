@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -23,7 +26,6 @@ use tracing::{debug, warn};
 
 use crate::{config::AppConfig, error::StartupError, problem::problem_response, state::AppState};
 
-const CERT_RETRY_AFTER_SECS: &str = "30";
 const GOOGLE_JWKS_URL: &str =
     "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 const IDENTITY_LOOKUP_URL: &str = "https://identitytoolkit.googleapis.com/v1/accounts:lookup";
@@ -31,6 +33,7 @@ const IDENTITY_TOOLKIT_SCOPE: &str = "https://www.googleapis.com/auth/identityto
 const DEFAULT_USER_AGENT: &str = "axum-playground/0.1.0";
 const DEFAULT_JWKS_TTL: Duration = Duration::from_secs(3600);
 const JWKS_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+const AUTH_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_KEY_ID_BYTES: usize = 128;
 const JWT_LEEWAY_SECS: u64 = 60;
 
@@ -128,6 +131,8 @@ struct EmulatorAuthVerifier {
 pub struct MockAuthVerifier {
     user: FirebaseUser,
     error: Option<AuthError>,
+    delay: Option<Duration>,
+    calls: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +236,7 @@ impl AuthVerifier {
 
         let client = Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
+            .timeout(AUTH_OPERATION_TIMEOUT)
             .build()
             .map_err(|_| StartupError::AuthHttpClientInitialization)?;
 
@@ -257,10 +263,16 @@ impl AuthVerifier {
     }
 
     pub async fn verify(&self, token: &str) -> Result<FirebaseUser, AuthError> {
-        match self.inner.as_ref() {
-            AuthVerifierInner::Production(verifier) => verifier.verify(token).await,
-            AuthVerifierInner::Emulator(verifier) => verifier.verify(token).await,
-            AuthVerifierInner::Mock(verifier) => verifier.verify(token).await,
+        let verification = async {
+            match self.inner.as_ref() {
+                AuthVerifierInner::Production(verifier) => verifier.verify(token).await,
+                AuthVerifierInner::Emulator(verifier) => verifier.verify(token).await,
+                AuthVerifierInner::Mock(verifier) => verifier.verify(token).await,
+            }
+        };
+        match tokio::time::timeout(AUTH_OPERATION_TIMEOUT, verification).await {
+            Ok(result) => result,
+            Err(_) => Err(AuthError::ServiceUnavailable),
         }
     }
 }
@@ -268,7 +280,12 @@ impl AuthVerifier {
 impl MockAuthVerifier {
     #[must_use]
     pub fn allow(user: FirebaseUser) -> Self {
-        Self { user, error: None }
+        Self {
+            user,
+            error: None,
+            delay: None,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     #[must_use]
@@ -282,7 +299,22 @@ impl MockAuthVerifier {
         self
     }
 
+    #[must_use]
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    #[must_use]
+    pub fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
     async fn verify(&self, _token: &str) -> Result<FirebaseUser, AuthError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
         self.error
             .clone()
             .map_or_else(|| Ok(self.user.clone()), Err)
@@ -295,12 +327,7 @@ impl ProductionAuthVerifier {
         let kid = rsa_key_id(&header)?;
 
         let jwk = self.jwks_client.key_for(kid).await?;
-        let key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
-            .map_err(|_| AuthError::InvalidToken)?;
-
-        let claims = decode::<FirebaseClaims>(token, &key, &firebase_validation(&self.project_id))
-            .map(|data| data.claims)
-            .map_err(map_jwt_error)?;
+        let claims = decode_firebase_claims(token, &jwk, &self.project_id)?;
 
         validate_common_claims(&claims, &self.project_id)?;
 
@@ -317,6 +344,18 @@ impl ProductionAuthVerifier {
 
         Ok(claims.into_user())
     }
+}
+
+fn decode_firebase_claims(
+    token: &str,
+    jwk: &GoogleJwk,
+    project_id: &str,
+) -> Result<FirebaseClaims, AuthError> {
+    let key =
+        DecodingKey::from_rsa_components(&jwk.n, &jwk.e).map_err(|_| AuthError::InvalidToken)?;
+    decode::<FirebaseClaims>(token, &key, &firebase_validation(project_id))
+        .map(|data| data.claims)
+        .map_err(map_jwt_error)
 }
 
 impl GoogleJwksClient {
@@ -572,21 +611,31 @@ impl FirebaseClaims {
 }
 
 pub fn extract_bearer_token(header_value: &str) -> Result<String, AuthError> {
-    let header_value = header_value.trim();
     if header_value.is_empty() {
         return Err(AuthError::MissingAuthorization);
     }
 
-    let parts = header_value.split_whitespace().collect::<Vec<_>>();
-    if parts.len() != 2 {
+    let Some(separator) = header_value.find(' ') else {
+        return Err(AuthError::InvalidAuthorization);
+    };
+    let scheme = &header_value[..separator];
+    let token = header_value[separator..].trim_start_matches(' ');
+    if !scheme.eq_ignore_ascii_case("bearer") || !valid_token68(token) {
         return Err(AuthError::InvalidAuthorization);
     }
 
-    if !parts[0].eq_ignore_ascii_case("bearer") || parts[1].is_empty() {
-        return Err(AuthError::InvalidAuthorization);
-    }
+    Ok(token.to_owned())
+}
 
-    Ok(parts[1].to_owned())
+fn valid_token68(value: &str) -> bool {
+    let without_padding = value.trim_end_matches('=');
+    !without_padding.is_empty()
+        && without_padding.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
+        && value[without_padding.len()..]
+            .bytes()
+            .all(|byte| byte == b'=')
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
@@ -596,17 +645,23 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let authorization = parts
+        let values = parts
             .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                unauthorized_response(&parts.headers, "missing or invalid authorization header")
-            })?;
+            .get_all(header::AUTHORIZATION)
+            .iter()
+            .collect::<Vec<_>>();
+        let authorization = match values.as_slice() {
+            [value] => value
+                .to_str()
+                .ok()
+                .filter(|value| !value.contains(','))
+                .ok_or_else(|| unauthorized_response(&parts.headers))?,
+            _ => return Err(unauthorized_response(&parts.headers)),
+        };
 
         let token = extract_bearer_token(authorization).map_err(|error| {
             debug!(reason = %categorize_auth_error(&error), "auth failed: invalid authorization header");
-            unauthorized_response(&parts.headers, "missing or invalid authorization header")
+            unauthorized_response(&parts.headers)
         })?;
 
         let user = state.auth_verifier.verify(&token).await.map_err(|error| {
@@ -632,7 +687,7 @@ fn validate_common_claims_at(
     project_id: &str,
     now: u64,
 ) -> Result<(), AuthError> {
-    if claims.sub.trim().is_empty() {
+    if !crate::validation::valid_opaque_id(&claims.sub) {
         return Err(AuthError::InvalidToken);
     }
     if claims
@@ -752,23 +807,16 @@ fn auth_error_is_dependency_failure(error: &AuthError) -> bool {
     )
 }
 
-fn unauthorized_response(headers: &HeaderMap, detail: &str) -> Response {
-    let mut response = problem_response(StatusCode::UNAUTHORIZED, detail, headers);
+fn unauthorized_response(headers: &HeaderMap) -> Response {
+    let mut response = problem_response(crate::problem::ProblemCode::Unauthorized, headers);
     response
         .headers_mut()
         .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     response
 }
 
-fn service_unavailable_response(headers: &HeaderMap, detail: &str, retry_after: bool) -> Response {
-    let mut response = problem_response(StatusCode::SERVICE_UNAVAILABLE, detail, headers);
-    if retry_after {
-        response.headers_mut().insert(
-            header::RETRY_AFTER,
-            HeaderValue::from_static(CERT_RETRY_AFTER_SECS),
-        );
-    }
-    response
+fn service_unavailable_response(headers: &HeaderMap) -> Response {
+    problem_response(crate::problem::ProblemCode::DependencyUnavailable, headers)
 }
 
 #[allow(
@@ -777,23 +825,16 @@ fn service_unavailable_response(headers: &HeaderMap, detail: &str, retry_after: 
 )]
 fn map_auth_error(headers: &HeaderMap, error: AuthError) -> Response {
     match error {
-        AuthError::CertificateFetch => service_unavailable_response(
-            headers,
-            "authentication service temporarily unavailable",
-            true,
-        ),
-        AuthError::ServiceUnavailable => service_unavailable_response(
-            headers,
-            "authentication service temporarily unavailable",
-            false,
-        ),
+        AuthError::CertificateFetch | AuthError::ServiceUnavailable => {
+            service_unavailable_response(headers)
+        }
         AuthError::MissingAuthorization | AuthError::InvalidAuthorization => {
-            unauthorized_response(headers, "missing or invalid authorization header")
+            unauthorized_response(headers)
         }
         AuthError::InvalidToken
         | AuthError::TokenExpired
         | AuthError::TokenRevoked
-        | AuthError::UserDisabled => unauthorized_response(headers, "invalid or expired token"),
+        | AuthError::UserDisabled => unauthorized_response(headers),
     }
 }
 
@@ -823,19 +864,19 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::future::join_all;
     use jsonwebtoken::{
-        Algorithm, Header,
+        Algorithm, Header, decode_header,
         errors::{Error as JwtError, ErrorKind as JwtErrorKind},
     };
     use serde_json::json;
 
     use super::{
-        AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier, FirebaseClaimMetadata,
-        FirebaseClaims, FirebaseUser, GoogleJwk, GoogleJwksClient, GoogleJwksResponse,
-        IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, JwksState,
-        MockGoogleJwksTransport, auth_error_is_dependency_failure, cache_ttl,
-        categorize_auth_error, expected_issuer, extract_bearer_token, firebase_validation,
-        map_jwt_error, require_successful_response, rsa_key_id, token_is_revoked,
-        validate_common_claims_at,
+        AUTH_OPERATION_TIMEOUT, AuthError, AuthVerifier, CachedJwks, EmulatorAuthVerifier,
+        FirebaseClaimMetadata, FirebaseClaims, FirebaseUser, GoogleJwk, GoogleJwksClient,
+        GoogleJwksResponse, IdentityLookupResponse, IdentityLookupUser, JWT_LEEWAY_SECS, JwksState,
+        MockAuthVerifier, MockGoogleJwksTransport, auth_error_is_dependency_failure, cache_ttl,
+        categorize_auth_error, decode_firebase_claims, expected_issuer, extract_bearer_token,
+        firebase_validation, map_jwt_error, require_successful_response, rsa_key_id,
+        token_is_revoked, validate_common_claims_at,
     };
     use crate::{config::AppConfig, error::StartupError};
 
@@ -865,8 +906,12 @@ mod tests {
             "token-123"
         );
         assert_eq!(
-            extract_bearer_token("BEARER   token-123   ").expect("token should parse"),
+            extract_bearer_token("BEARER   token-123").expect("token should parse"),
             "token-123"
+        );
+        assert_eq!(
+            extract_bearer_token("Bearer abc==").expect("padded token68 should parse"),
+            "abc=="
         );
     }
 
@@ -884,6 +929,33 @@ mod tests {
             extract_bearer_token("Bearer token extra"),
             Err(AuthError::InvalidAuthorization)
         );
+        assert_eq!(
+            extract_bearer_token("Bearer\ttoken"),
+            Err(AuthError::InvalidAuthorization)
+        );
+        assert_eq!(
+            extract_bearer_token("Bearer token "),
+            Err(AuthError::InvalidAuthorization)
+        );
+        assert_eq!(
+            extract_bearer_token("Bearer abc=def"),
+            Err(AuthError::InvalidAuthorization)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_operation_timeout_is_exact_and_controlled() {
+        let mock = MockAuthVerifier::test_user()
+            .with_delay(AUTH_OPERATION_TIMEOUT + Duration::from_secs(1));
+        let verifier = AuthVerifier::mock(mock.clone());
+        let started = tokio::time::Instant::now();
+
+        assert_eq!(
+            verifier.verify("token").await,
+            Err(AuthError::ServiceUnavailable)
+        );
+        assert_eq!(started.elapsed(), AUTH_OPERATION_TIMEOUT);
+        assert_eq!(mock.call_count(), 1);
     }
 
     #[test]
@@ -951,6 +1023,49 @@ mod tests {
         let mut wrong_algorithm = Header::new(Algorithm::HS256);
         wrong_algorithm.kid = Some("google-key".to_owned());
         assert_eq!(rsa_key_id(&wrong_algorithm), Err(AuthError::InvalidToken));
+
+        let none_token = unsigned_token(json!({"alg": "none", "kid": "google-key"}), json!({}));
+        assert_eq!(
+            map_jwt_error(decode_header(&none_token).expect_err("none must not decode")),
+            AuthError::InvalidToken
+        );
+    }
+
+    #[test]
+    fn production_signature_verification_rejects_a_corrupted_rs256_token() {
+        const PUBLIC_TEST_RSA_MODULUS: &str = concat!(
+            "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_",
+            "cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9Kw",
+            "RXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ",
+            "9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1A",
+            "GLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn",
+            "2ujn8uKjXLZVD5TdQ",
+        );
+        let now = super::unix_timestamp_now();
+        let token = format!(
+            "{}{}",
+            unsigned_token(
+                json!({"alg": "RS256", "kid": "test-key", "typ": "JWT"}),
+                json!({
+                    "sub": "user-123",
+                    "aud": "demo-test-project",
+                    "iss": expected_issuer("demo-test-project"),
+                    "iat": now - 1,
+                    "auth_time": now - 1,
+                    "exp": now + 3600
+                }),
+            ),
+            URL_SAFE_NO_PAD.encode([0_u8; 256]),
+        );
+        let jwk = GoogleJwk {
+            kid: "test-key".to_owned(),
+            n: PUBLIC_TEST_RSA_MODULUS.to_owned(),
+            e: "AQAB".to_owned(),
+        };
+
+        let error = decode_firebase_claims(&token, &jwk, "demo-test-project")
+            .expect_err("corrupted signature must fail verification");
+        assert_eq!(error, AuthError::InvalidToken);
     }
 
     #[test]
@@ -1472,7 +1587,6 @@ mod tests {
             port: 8080,
             firebase_project_id: "demo-test-project".to_owned(),
             app_environment: crate::config::AppEnvironment::Development,
-            github_token: None,
             google_application_credentials: None,
             firebase_auth_emulator_host: None,
             firestore_emulator_host: None,

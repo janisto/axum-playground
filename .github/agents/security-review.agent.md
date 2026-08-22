@@ -11,18 +11,18 @@ Perform a comprehensive security review of this Rust/Axum REST API following OWA
 
 Before analysis, read these files:
 1. `src/main.rs` - application setup and startup wiring
-2. `src/app.rs` - router setup, middleware order, and CORS configuration
+2. `src/app.rs` - router setup, middleware order, body limits, and method policy
 3. `src/middleware/security.rs` - security headers middleware
 4. `src/telemetry.rs` - `axum-observability` structured logging configuration
 5. `Cargo.toml` and `Cargo.lock` - the pinned `axum-observability` version
 6. `src/middleware/recover.rs` - panic recovery middleware
-7. `src/middleware/timeout.rs` - timeout behavior
+7. `src/config.rs` - production and emulator configuration boundaries
 8. `src/problem/mod.rs` - Problem Details responses
 9. `src/http/negotiation.rs` - JSON/CBOR negotiation behavior
 10. `src/http/codec.rs` - request/response content handling
 11. All files in `src/http/v1/` - endpoint definitions and docs wiring
 12. `src/auth/mod.rs` - authentication flow
-13. `src/services/profile.rs` - profile persistence and normalization
+13. `src/services/profile.rs` and `src/profile_migration.rs` - profile persistence, normalization, and migration safety
 14. `src/services/github.rs` - upstream call error mapping
 
 ## Security Review Checklist
@@ -44,7 +44,7 @@ Before analysis, read these files:
 Verify these headers are applied where appropriate:
 ```http
 Cache-Control: no-store
-Content-Security-Policy: frame-ancestors 'none'
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Resource-Policy: same-origin
 Permissions-Policy: ...
@@ -71,13 +71,13 @@ X-Frame-Options: DENY
 - [ ] Emulator-only behavior is gated to local/emulator configuration
 
 ### 7. CORS & Origin Policy
-- [ ] CORS behavior is explicit and consistent with project intent
+- [ ] Cross-origin access is disabled unless an explicit environment boundary provides it
 - [ ] Exposed headers are deliberate
 - [ ] `Vary` behavior is safe for caches and intermediaries
 
 ### 8. Rate Limiting & DoS Protection
 - [ ] Request body size limits are enforced
-- [ ] Timeouts exist for request handling and upstream service calls
+- [ ] Upstream service calls have explicit timeouts; deployment deadlines are not mistaken for application-wide middleware
 - [ ] Paginated list endpoints bound result sizes
 
 ### 9. IDOR & Resource Access

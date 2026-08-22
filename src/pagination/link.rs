@@ -54,7 +54,6 @@ fn encode_query_component(value: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 encoded.push(byte as char);
             }
-            b' ' => encoded.push('+'),
             _ => encoded.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -65,7 +64,7 @@ fn encode_query_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::build_link_header;
-    use crate::pagination::cursor::Cursor;
+    use crate::pagination::cursor::{Cursor, CursorDirection, CursorScope};
 
     #[test]
     fn link_header_includes_next_and_prev_relations() {
@@ -96,7 +95,18 @@ mod tests {
 
     #[test]
     fn link_header_keeps_cursor_url_safe() {
-        let cursor = Cursor::new("item", "abc/def+ghi=jkl").encode();
+        let cursor = Cursor::new(
+            &CursorScope {
+                operation: "listItems",
+                owner: None,
+                repository: None,
+                limit: 20,
+                category: None,
+            },
+            CursorDirection::Next,
+            "abc/def+ghi=jkl",
+        )
+        .encode();
         let link = build_link_header("/items", &[], Some(&cursor), None);
 
         assert!(link.contains("cursor="));
@@ -104,12 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn link_header_form_encodes_spaces_in_preserved_filters() {
+    fn link_header_percent_encodes_spaces_in_preserved_filters() {
         let link = build_link_header("/items", &[("category", "power tools")], Some("next"), None);
 
         assert_eq!(
             link,
-            "</items?category=power+tools&cursor=next>; rel=\"next\""
+            "</items?category=power%20tools&cursor=next>; rel=\"next\""
         );
     }
 }

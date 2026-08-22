@@ -15,17 +15,17 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 
 ### Features
 
-- Layered middleware architecture with security headers, CORS, panic recovery, timeouts, and [`axum-observability` v2.0.0](https://crates.io/crates/axum-observability/2.0.0) request correlation and terminal access logging
-- Request-scoped W3C Trace Context Level 1 correlation via `traceparent`, falling back to the validated request ID when no valid trace context is present
+- Layered middleware architecture with security headers, panic recovery, explicit HEAD handling, operation-scoped body limits, and [`axum-observability` v2.0.0](https://crates.io/crates/axum-observability/2.0.0) request correlation and terminal access logging
+- Request-scoped W3C Trace Context Level 1 correlation via `traceparent`, plus the portable `X-Request-ID` grammar and a 32-character lowercase hexadecimal fallback
 - GCP-shaped NDJSON logs on stdout with low-cardinality Axum route templates; concrete paths, query strings, peer IPs, and user agents are omitted
 - RFC 9457 Problem Details for JSON errors and the same data model encoded as generic CBOR
 - Strict JSON/CBOR negotiation on versioned responses, including `406 Not Acceptable` and exact media-range precedence
 - Strict JSON/CBOR request decoding with negotiated Problem Details for malformed, unsupported, and oversized bodies
 - Cursor-based pagination with RFC 8288 `Link` headers on items, GitHub repositories, activity, and tags
-- OpenAPI 3.1 documentation at `/v1/openapi`, including JSON/CBOR request and response media types plus bearer auth, with Swagger UI at `/api-docs`
-- A resolvable standalone Problem Details JSON Schema at `/schemas/ErrorModel.json`, advertised through RFC 8288 `describedby` links
-- Firebase Authentication with production JWKS verification, disabled and revoked user checks, and emulator-mode support
-- Firestore-backed profile persistence with safe opaque-UID document keys, normalization, and audit logging
+- OpenAPI 3.1 documentation at `/openapi.json`, including exact JSON/CBOR media types, controlled responses, headers, and Firebase bearer auth, with Swagger UI at `/api-docs`
+- Firebase Authentication with production JWKS verification, disabled and revoked user checks, a 30-second authentication-operation deadline, and emulator-mode support
+- Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, a 30-second persistence-operation deadline, and an audit-first one-time migration for the retired profile shape
+- Anonymous, credential-free GitHub transport with fixed API-version headers, manual same-origin redirects, strict projections, bounded bodies, and a single ten-second operation deadline
 - Health check endpoint at `/health`
 
 ### API Design Principles
@@ -34,7 +34,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 
 - Use plural nouns for collections and resource groupings
 - Avoid verbs in URIs when the HTTP method already expresses the action
-- Keep the versioned API under `/v1` and reserve root-level routes for shared platform endpoints such as `/health` and `/api-docs`
+- Keep the versioned API under `/v1` and reserve root-level routes for shared platform endpoints such as `/health`, `/openapi.json`, and `/api-docs`
 
 #### HTTP Methods & Status Codes
 
@@ -50,7 +50,7 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 Errors use the RFC 9457 Problem Details data model and honor content negotiation:
 
 - `application/problem+json` when JSON is requested or selected by default
-- `application/cbor` when CBOR is explicitly preferred
+- `application/cbor` when CBOR is selected by quality and specificity, including wildcard fallback after a more-specific JSON exclusion
 
 `application/problem+cbor` is not a registered media type. The registered `application/concise-problem-details+cbor` type defines a different compact model and is not implemented here.
 
@@ -58,25 +58,27 @@ Errors use the RFC 9457 Problem Details data model and honor content negotiation
 | --- | --- |
 | 400 Bad Request | Malformed syntax, invalid cursor, cursor type mismatch |
 | 401 Unauthorized | Missing or invalid authentication |
-| 403 Forbidden | Authenticated but not authorized, or upstream access denied |
+| 403 Forbidden | A controlled authorization policy rejects the request |
 | 404 Not Found | Resource does not exist |
 | 406 Not Acceptable | No supported success representation is acceptable |
 | 409 Conflict | Profile already exists |
-| 413 Content Too Large | Request body exceeds the 1 MiB limit |
+| 413 Content Too Large | A modeled request body exceeds exactly 1,000,000 bytes |
 | 415 Unsupported Media Type | Request body is not owned JSON or CBOR |
 | 422 Unprocessable Entity | Validation failures on well-formed input or invalid upstream cursor parameters |
-| 502 Bad Gateway | Upstream dependency failure |
-| 503 Service Unavailable | Request timeout or temporary authentication or persistence failure |
+| 429 Too Many Requests | GitHub reports quota exhaustion |
+| 502 Bad Gateway | GitHub transport or response validation fails |
+| 503 Service Unavailable | Authentication or persistence is temporarily unavailable |
+| 504 Gateway Timeout | The complete GitHub operation exceeds ten seconds |
 
 #### Content Negotiation
 
 - JSON is the default and wins equal-quality ties.
-- CBOR is selected only by an explicit positive-quality `application/cbor` media range; wildcards do not silently opt clients into binary responses.
+- CBOR is selected when it outranks JSON. A wildcard alone ties the representations and JSON wins, but a wildcard can select CBOR when a more-specific range excludes JSON, such as `application/json;q=0, application/*;q=1`.
 - Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
 - Request bodies must declare exactly one `Content-Type` value of `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, a CBOR body must contain exactly one data item, and `Content-Encoding` is limited to absent or a single `identity` value.
-- Problems use `application/problem+json` by default and `application/cbor` when CBOR is explicitly preferred. Error negotiation is best effort so an existing error is not replaced by a second 406.
+- Problems use `application/problem+json` by default and `application/cbor` under the same quality and specificity rules. Error negotiation is best effort so an existing error is not replaced by a second 406.
 - Bodyless 204 responses ignore `Accept`.
-- `/health` remains JSON-only
+- `/health` follows the same JSON-default representation negotiation contract
 
 See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.rfc-editor.org/rfc/rfc8949), [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457), and the [IANA media type registry](https://www.iana.org/assignments/media-types/media-types.xhtml) for the underlying contracts. Deterministic CBOR is intentionally not required because these payloads are transport representations, not signature or hash inputs.
 
@@ -103,7 +105,6 @@ cp .env.example .env
 | `PORT` | Server listen port | `8080` |
 | `FIREBASE_PROJECT_ID` | Firebase project ID and fallback Google project anchor | `demo-test-project` |
 | `APP_ENVIRONMENT` | Runtime environment: `development`, `test`, or `production` | `development` |
-| `GITHUB_TOKEN` | Optional token for higher-rate GitHub API access | - |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
 | `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
 | `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | - |
@@ -120,7 +121,8 @@ Notes:
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
 - If the Google project fallback variables are unset, the app falls back to `FIREBASE_PROJECT_ID`.
 - Runtime state always constructs real HTTP, authentication, and persistence services. Tests compose explicit doubles; setting `APP_ENVIRONMENT=test` does not activate mock services.
-- `GITHUB_TOKEN` and the credentials path are redacted from `AppConfig` debug output.
+- The application routes never read or attach `GITHUB_TOKEN` or another ambient GitHub credential. Their caller-selected resources are fetched anonymously and are restricted to public projections.
+- The credentials path is redacted from `AppConfig` debug output.
 - Outbound GitHub requests pin [`X-GitHub-Api-Version: 2026-03-10`](https://docs.github.com/en/rest/about-the-rest-api/api-versions). This is an application contract rather than an environment setting; upgrading it requires reviewing GitHub payload schemas and the deterministic service tests together.
 
 ## Local Development
@@ -168,7 +170,7 @@ Then visit:
 
 - `http://localhost:8080/health` for the health probe
 - `http://localhost:8080/api-docs` for Swagger UI
-- `http://localhost:8080/v1/openapi` for the OpenAPI document
+- `http://localhost:8080/openapi.json` for the OpenAPI document
 
 Sample request:
 
@@ -189,10 +191,10 @@ src/
 		codec.rs        # Shared body decoding and response encoding
 		extract.rs      # Problem Details-aware path and query extractors
 		negotiation.rs  # RFC 9110 JSON/CBOR selection
-		schema.rs       # Standalone Problem Details JSON Schema
 		v1/             # Versioned API routes and docs wiring
-	middleware/       # Application-owned recovery, security, and timeout middleware
+	middleware/       # Application-owned recovery and security middleware
 	pagination/       # Cursor and RFC 8288 link helpers
+	profile_migration.rs # Audit-first retired-profile migration
 	problem/          # Problem Details model and response construction
 	services/         # GitHub and profile service implementations
 	shutdown.rs       # Graceful shutdown coordination
@@ -200,6 +202,7 @@ src/
 	telemetry.rs      # Tracing subscriber initialization
 	lib.rs            # Reusable app construction
 	main.rs           # Thin startup entrypoint
+	bin/migrate_profiles.rs # Explicit one-time migration command
 tests/              # In-process integration tests
 .agents/skills/     # Five portable coding-agent workflows with Codex metadata
 .github/agents/     # GitHub Copilot custom-agent profiles
@@ -216,8 +219,7 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | --- | --- | --- |
 | GET | `/health` | Health check route |
 | GET | `/api-docs` | Swagger UI |
-| GET | `/v1/openapi` | OpenAPI document |
-| GET | `/schemas/ErrorModel.json` | Problem Details JSON Schema |
+| GET | `/openapi.json` | OpenAPI document |
 | GET | `/v1/hello` | Default greeting |
 | POST | `/v1/hello` | Create a personalized greeting |
 | GET | `/v1/items` | List items with cursor-based pagination |
@@ -316,6 +318,54 @@ The emulator test is explicitly ignored by the normal suite, and
 GitHub Actions runs `just test-emulators-ci` as a required, isolated job using
 the demo project ID, so it cannot contact a live Firestore project.
 
+#### One-time Profile Migration
+
+The accepted profile contract retires the persisted `firstname`, `lastname`,
+`email`, `marketing`, and `terms` fields in favor of `firstName`, `lastName`,
+`contactEmail`, `marketingOptIn`, and `termsAccepted`. The runtime does not
+dual-read or dual-write the retired shape.
+
+The repository-owned command is read-only unless `--apply` and an exact project
+confirmation are both present. Audit is the default:
+
+```bash
+APP_ENVIRONMENT=production \
+FIREBASE_PROJECT_ID=my-project \
+cargo run --locked --bin migrate_profiles -- --audit
+```
+
+It classifies only the exact retired shape, the exact current shape, or a
+blocked record. It validates document ownership and every canonical value,
+normalizes legacy contact fields, converts legacy clock timestamps to UTC
+milliseconds, and reports only aggregate record counts without per-record identifiers.
+Any mixed, unknown, wrongly typed, invalid, or document-ID-mismatched record
+blocks the complete apply preflight before the first write.
+
+Applying requires the same configured project ID to be repeated literally:
+
+```bash
+APP_ENVIRONMENT=production \
+FIREBASE_PROJECT_ID=my-project \
+cargo run --locked --bin migrate_profiles -- \
+  --apply --confirm-project my-project
+```
+
+Each target is re-read in a Firestore transaction and fully replaced with the
+canonical object. A changed or newly invalid target stops the run; records
+already migrated are recognized as current, so the command is safe to rerun.
+A final audit must find only current records. Firestore client initialization,
+each complete audit or verification scan, and each per-target transaction have
+an independent 30-second deadline. If a transaction times out, treat its commit
+outcome as unknown and rerun the audit before resuming apply.
+
+This migration and the new runtime form one atomic operational cutover. Build
+the new revision without serving it, stop old profile writers and traffic,
+take the required Firestore backup or export, run and resolve the audit, apply
+the migration, activate the new revision, and verify profile reads before
+reopening traffic. Rolling back the application alone is unsafe after apply;
+restore the pre-migration data together with the retired runtime. None of these
+production steps is performed by repository QA.
+
 ## Future Deployment
 
 No environment has been deployed or validated from this repository. The following files document the intended Cloud Run path for future use; they are not evidence of production readiness.
@@ -355,8 +405,8 @@ Production runtime expectations:
 - The service listens on `0.0.0.0:$PORT` and defaults to `8080` locally
 - Cloud Run terminates TLS before forwarding HTTP traffic to the container
 - Production credentials should come from the attached service identity rather than a local key file
-- Configure a restrictive CORS policy before public deployment; the current wildcard, non-credentialed policy is for local example access
-- Put Cloud Run or another front proxy in front of the Axum server to enforce connection-level limits in addition to the application request timeout
+- Configure any required CORS policy at the environment boundary; the application does not enable wildcard CORS
+- Put Cloud Run or another front proxy in front of the Axum server for connection and platform deadlines; the application owns 30-second authentication- and persistence-operation deadlines and the contract's ten-second GitHub operation deadline rather than a global request timeout
 
 ## QA Surface
 
@@ -365,7 +415,9 @@ Production runtime expectations:
 - In-process route behavior and JSON/CBOR negotiation across the public API
 - Problem details, request ID behavior, and 404 or 405 fallback behavior
 - Firebase auth parsing, revocation semantics, and local-only emulator guardrails
-- Firestore-backed profile CRUD through required hosted emulator coverage and an equivalent local command
+- Firestore-backed profile CRUD and retired-shape migration through required hosted emulator coverage and an equivalent local command
+- Exact generated OpenAPI inventory, local-reference resolution, schemas, media types, statuses, security, and headers
+- GitHub transport redirects, content metadata, body bounds, deadlines, quota hints, projection guards, and provider-link translation through deterministic doubles
 - Dependency policy and vulnerability checks through `just deny` and `just audit`
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
 - Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
