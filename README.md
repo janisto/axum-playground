@@ -204,7 +204,7 @@ src/
 	main.rs           # Thin startup entrypoint
 	bin/migrate_profiles.rs # Explicit one-time migration command
 tests/              # In-process integration tests
-.agents/skills/     # Five portable coding-agent workflows with Codex metadata
+.agents/skills/     # Portable coding-agent workflows with Codex metadata
 .github/agents/     # GitHub Copilot custom-agent profiles
 .github/workflows/  # GitHub Actions automation
 functions/          # Placeholder directory for future Firebase functions

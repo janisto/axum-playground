@@ -1,48 +1,96 @@
 # AGENTS.md
 
-Instructions for coding agents working in this repository.
-
-`README.md` is for human users and contributors: setup, capabilities, architecture, operations, and contribution entry points. `AGENTS.md` is for coding agents: execution rules, implementation constraints, and validation policy. Do not duplicate agent instructions into the README or turn this file into human onboarding documentation.
+Instructions for coding agents. Keep execution rules here; `README.md` serves
+human users and contributors. Do not duplicate agent instructions into it.
 
 ## Engineering priorities
 
-- Correctness first, then readability and maintainability, then performance.
-- Inspect the relevant implementation, callers, and existing tests before changing behavior.
-- Prefer the smallest safe change that solves the problem.
-- Reuse existing local patterns and utilities, refactoring them when needed, instead of creating parallel abstractions or adding dependencies.
-- State the failure mode before architectural, security, persistence, or production-impacting changes.
-- Do not declare completion until implementation, validation, and remaining risks are reported.
-- Keep source comments and documentation concise. Do not add progress narration, generated banners, emojis, or speculative TODOs.
+- Prioritize correctness, readability, maintainability, then performance.
+- Inspect the implementation, callers, and tests before changing behavior.
+- Prefer the smallest safe change; reuse or refactor local patterns and utilities
+  before adding abstractions or dependencies.
+- Validate review findings against requirements and reproducible behavior.
+  Simplify unnecessary behavior instead of adding machinery to defend it.
+- State the failure mode before architectural, security, persistence, or
+  production-impacting changes.
+- Report implementation, validation, and remaining risks before completion.
+- Keep instructions, comments, and documentation concise. Explain and obtain
+  explicit approval before removing, merging, or relocating guidance, including
+  obsolete rules, completed-task narration, and duplicates.
+- Do not add progress narration, generated banners, emojis, or speculative TODOs.
+- Keep public code, instructions, commits, and PR text self-contained; do not
+  disclose private coordination repositories, paths, revisions, or discussions.
 
-## Pull requests
+## Epistemic honesty and scope discipline
 
-- Format titles as `type[optional scope]: description`. Prefer no scope; include one only when it materially improves clarity.
-- Use `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`, or `revert` as the type. Example: `feat: add response size field`.
-- Keep each pull request focused. In the body, explain why the change is needed, what changed, how it was validated, and any remaining risk.
-- Keep the title suitable for the final squash or merge commit.
-- This repository does not maintain a `CHANGELOG.md`; do not create one or require changelog entries in pull requests.
+- Report defects, corrupted data, unmet requirements, and unfinished work plainly.
+  Never conceal them in justifications or relabel them as simplifications,
+  provisional scope, or expected limitations. If a problem is deeper than
+  expected, stop at a safe boundary and report the exact failure, affected
+  behavior or records, and remaining work.
+- Counts, checksums, and passing tests show consistency, not semantic correctness.
+  Before claiming Serde parsing, validation, or Firestore transformations work,
+  inspect accepted inputs and resulting responses or profiles using synthetic
+  fixtures or authorized data. Hunt for false positives; report the worst counterexamples,
+  or describe the sample when none were found.
+- Fix the bug class behind cited failures: correct the grammar, validation, query,
+  or logic and audit all affected paths or records within the authorized scope.
+  Do not hardcode cited values into exceptions or blocklists, or patch only named
+  IDs.
+- Do not weaken specifications, `AGENTS.md`, or active plans to excuse defects or
+  shortcuts. Follow current task scope and stop gates. For review-only or
+  report-only work, edit only an explicitly requested report.
+- After the final code, schema, or generator change, rebuild affected generated
+  OpenAPI, fixture artifacts, and test data, then rerun relevant checks. Earlier passing results do not validate later edits.
 
-## Commits
+## Commits and pull requests
 
-- Follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
-- Prefer no scope; include one only when it materially improves clarity. Write a short, imperative description. Example: `fix: preserve request ID`.
-- Mark breaking changes with `!` and explain them in a `BREAKING CHANGE:` footer.
-- Before committing, run `just qa` and `git diff --check`.
+- Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+  `type: imperative description`. Add a scope only when
+  it materially improves clarity. Types: `feat`, `fix`, `docs`, `test`, `refactor`,
+  `perf`, `build`, `ci`, `chore`, and `revert`.
+- Use the same format for PR titles, suitable for the final merge commit. Keep PRs
+  focused; describe the problem, resulting behavior, validation, and remaining
+  risks.
+- Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
+- Work on task branches. Before committing, run `just qa` and `git diff --check`.
+- This repository has no `CHANGELOG.md`; do not create one or require entries.
 
 ## GitHub automation
 
+This example is not deployed; GCP is a possible future target. Keep manual
+deployment examples project-agnostic and do not deploy on pushes, PRs, or merges.
+
+- Keep required `ci` and independent pure `lint` checks. Preserve early lint
+  feedback and fail CI when a mandatory validation result is not successful.
+- Before workflow changes, use Chrome to inspect GitHub Settings > Rules >
+  Rulesets, including required check names and GitHub App sources. Preserve
+  existing enforcement until replacements reach trunk. Verify final rulesets
+  and actual PR checks in Chrome; CLI/API evidence supplements this. If access
+  is unavailable, report the blocker. Never weaken protection to make a PR pass.
+- Match local and CI workflow scanners. Use one enforcing read-only offline
+  pedantic zizmor scan in plain mode; do not add SARIF uploads or security-event
+  write permissions. Keep scanners independent of language quality checks.
+- Keep Dependabot security alerts and automated security updates disabled;
+  retain scheduled version updates and native audits. Do not add replacement
+  alert bots or repeat unchanged upstream triage. Keep auto-merge limited to
+  verified Dependabot minor/patch updates behind required checks; do not add
+  duplicate package filters, state queries, enablement triggers, or revocation
+  machinery. Handle old PR cleanup once.
 - Reference GitHub Actions by explicit full release tags such as
   `owner/action@v1.2.3`, not full commit SHAs or floating major-version tags.
   Dependabot updates those release tags.
 
 ## Mandatory skills
 
+- Use `.agents/skills/edit-agent-instructions/SKILL.md` when reviewing or editing
+  root or nested agent instructions.
 - Use `.agents/skills/adversarial-testing/SKILL.md` for every task that plans, creates, modifies, reviews, debugs, or evaluates tests. Apply it alongside any more specific framework or infrastructure testing skill.
 - Use `.agents/skills/readme-maintenance/SKILL.md` for every README audit or change. Also use it to assess README impact whenever public behavior, configuration, setup, commands, architecture, deployment, CI, or supported versions change. A README edit is required only when the audit finds a stale or missing reader-facing claim.
 
 ## Repository and toolchain
 
-- Rust 1.97.1, edition 2024, Axum 0.8, and Tokio are the current baseline. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
+- Use the Rust pin in `rust-toolchain.toml`, edition 2024, Axum 0.8, and Tokio. Keep `Cargo.toml`, `rust-toolchain.toml`, the container builder, workflows, and documentation aligned when the supported Rust version changes.
 - Prefer current official Rust, Axum, Tokio, Tower, and crate documentation over older examples, especially pre-Axum-0.8 or pre-edition-2024 patterns.
 - Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
@@ -94,12 +142,19 @@ Instructions for coding agents working in this repository.
 
 ## Tests and validation
 
-- Apply `adversarial-testing` for risk analysis and `rust-testing` for repository mechanics whenever tests are in scope.
-- Use in-process router tests with `tower::ServiceExt::oneshot(...)`; do not bind network ports for ordinary tests.
-- Reuse `tests/common/mod.rs` for application state and JSON, CBOR, or text body decoding. Keep unit tests next to pure helpers and HTTP behavior in `tests/`.
-- Assert observable contracts: exact status, media type, relevant headers, decoded body fields, service side effects, and forbidden calls or leaks. Do not test only that Axum registration succeeds or that a mock returned its configured value.
-- Unit and ordinary integration tests must not contact live Firebase, Firestore, GitHub, or other network services. Emulator coverage stays conditional and isolated in `tests/firestore_emulator.rs`.
-- Run the narrowest relevant target first. For code changes, broaden through `just fmt-check`, `just lint`, `just test`, and `just check` as appropriate. Run `just test-emulators` when Firestore emulator semantics change and `just docker-build` when the container or runtime assembly changes.
+- Apply `adversarial-testing` for risk analysis and `rust-testing` for repository
+  mechanics whenever tests are in scope. Keep pure helper tests beside `src/`
+  modules. Before HTTP integration work or behavior changes requiring HTTP
+  coverage, read [tests/AGENTS.md](tests/AGENTS.md).
+- Unit and ordinary integration tests must not contact live Firebase, Firestore,
+  GitHub, or other network services. Emulator coverage remains conditional and
+  isolated in `tests/firestore_emulator.rs`.
+- Run the narrowest relevant target first, then `just fmt-check`, `just lint`,
+  `just test`, and `just check` as appropriate. Run `just test-emulators` for
+  Firestore emulator changes and `just docker-build` for container/runtime changes.
+
+### Mutation testing
+
 - Run mutation testing when changing production logic or strengthening focused tests. Add tests for meaningful surviving mutants, not equivalent transformations, and keep generated mutation artifacts untracked.
 - Before starting a mutation run, check for active `cargo-mutants` and `just mutations` processes and inspect `mutants.out/lock.json`. The lock file persists after a completed run, so its presence alone does not mean the lock is held; never delete it to bypass a live OS lock or start a competing run. Mutation campaigns can legitimately take a long time, so allow an active healthy run to finish and report progress instead of interrupting it because of elapsed time alone.
 - Preserve any mutation results still needed before starting another run: cargo-mutants rotates `mutants.out` to `mutants.out.old` and deletes the previous old output. Before using `--iterate`, verify that the current `mutants.out` is the intended source run and contains the expected `caught.txt`, `previously_caught.txt`, and `unviable.txt` state.
@@ -115,6 +170,7 @@ Portable repository skills live under `.agents/skills/` and each contains `SKILL
 | Skill | Use when |
 |---|---|
 | `adversarial-testing` | Planning, writing, reviewing, or debugging tests at any layer |
+| `edit-agent-instructions` | Reviewing or editing root or nested agent instructions |
 | `axum-endpoint` | Creating or changing Axum routes and their HTTP contracts |
 | `pagination-endpoint` | Creating or changing cursor-paginated list endpoints |
 | `readme-maintenance` | Auditing human-facing README claims against the repository |
