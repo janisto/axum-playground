@@ -18,8 +18,9 @@ human users and contributors. Do not duplicate agent instructions into it.
   explicit approval before removing, merging, or relocating guidance, including
   obsolete rules, completed-task narration, and duplicates.
 - Do not add progress narration, generated banners, emojis, or speculative TODOs.
-- Keep public code, instructions, commits, and PR text self-contained; do not
-  disclose private coordination repositories, paths, revisions, or discussions.
+- Keep public code, instructions, comments, documentation, commits, and PR text
+  self-contained. Do not disclose private coordination repositories, paths,
+  revisions, or discussions.
 
 ## Epistemic honesty and scope discipline
 
@@ -46,15 +47,61 @@ human users and contributors. Do not duplicate agent instructions into it.
 ## Commits and pull requests
 
 - Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
-  `type: imperative description`. Add a scope only when
-  it materially improves clarity. Types: `feat`, `fix`, `docs`, `test`, `refactor`,
-  `perf`, `build`, `ci`, `chore`, and `revert`.
+  `type: imperative description`. Add a scope only when it materially improves
+  clarity. Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`,
+  `ci`, `chore`, and `revert`.
 - Use the same format for PR titles, suitable for the final merge commit. Keep PRs
   focused; describe the problem, resulting behavior, validation, and remaining
   risks.
-- Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
-- Work on task branches. Before committing, run `just qa` and `git diff --check`.
+- Mark breaking changes with `!` and a `BREAKING CHANGE:` footer explaining the
+  impact.
+- Work on task branches; never commit directly to the default branch.
+- Before committing, always run `just qa` and `git diff --check`.
+- Use one atomic PR when layers would require manual settings changes between
+  merges. A stack must be mergeable as a whole.
 - This repository has no `CHANGELOG.md`; do not create one or require entries.
+
+## Skills and validation
+
+### Required guidance
+
+- Use `.agents/skills/edit-agent-instructions/SKILL.md` when reviewing or editing
+  root or nested agent instructions.
+- Use `.agents/skills/adversarial-testing/SKILL.md` whenever planning, creating,
+  modifying, reviewing, debugging, or evaluating tests. Apply relevant language,
+  framework, and infrastructure testing guidance alongside it.
+- Use `.agents/skills/readme-maintenance/SKILL.md` for README audits and edits.
+  Assess README impact when API behavior/contracts, persistence, configuration,
+  setup, commands, architecture, tooling, deployment, CI, or supported versions
+  change. Edit the README only for stale or missing reader-facing claims.
+
+### Validation
+
+- Apply `adversarial-testing` for risk analysis and `rust-testing` for repository
+  mechanics whenever tests are in scope. Keep pure helper tests beside `src/`
+  modules. Before HTTP integration work or behavior changes requiring HTTP
+  coverage, read [tests/AGENTS.md](tests/AGENTS.md).
+- Unit and ordinary integration tests must not contact live Firebase, Firestore,
+  GitHub, or other network services. Emulator coverage remains conditional and
+  isolated in `tests/firestore_emulator.rs`.
+- Run the narrowest relevant target first, then `just fmt-check`, `just lint`,
+  `just test`, and `just check` as appropriate. Run `just test-emulators` for
+  Firestore emulator changes and `just docker-build` for container/runtime changes.
+
+### Task guides
+
+Portable repository skills live under `.agents/skills/` and each contains `SKILL.md` plus `agents/openai.yaml`. GitHub Copilot custom-agent profiles remain separately under `.github/agents/`.
+
+| Skill | Use when |
+|---|---|
+| `adversarial-testing` | Planning, writing, reviewing, or debugging tests at any layer |
+| `edit-agent-instructions` | Reviewing or editing root or nested agent instructions |
+| `axum-endpoint` | Creating or changing Axum routes and their HTTP contracts |
+| `pagination-endpoint` | Creating or changing cursor-paginated list endpoints |
+| `readme-maintenance` | Auditing human-facing README claims against the repository |
+| `rust-testing` | Applying Rust, Axum, fixture, emulator, and command conventions for tests |
+
+Keep skill frontmatter, directory names, UI metadata, paths, commands, and repository behavior aligned. Do not turn skills into generic persona prompts or duplicate large sections of this file.
 
 ## GitHub automation
 
@@ -80,13 +127,6 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Reference GitHub Actions by explicit full release tags such as
   `owner/action@v1.2.3`, not full commit SHAs or floating major-version tags.
   Dependabot updates those release tags.
-
-## Mandatory skills
-
-- Use `.agents/skills/edit-agent-instructions/SKILL.md` when reviewing or editing
-  root or nested agent instructions.
-- Use `.agents/skills/adversarial-testing/SKILL.md` for every task that plans, creates, modifies, reviews, debugs, or evaluates tests. Apply it alongside any more specific framework or infrastructure testing skill.
-- Use `.agents/skills/readme-maintenance/SKILL.md` for every README audit or change. Also use it to assess README impact whenever public behavior, configuration, setup, commands, architecture, deployment, CI, or supported versions change. A README edit is required only when the audit finds a stale or missing reader-facing claim.
 
 ## Repository and toolchain
 
@@ -140,20 +180,7 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Keep request logs and trace correlation in `axum-observability`. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 
-## Tests and validation
-
-- Apply `adversarial-testing` for risk analysis and `rust-testing` for repository
-  mechanics whenever tests are in scope. Keep pure helper tests beside `src/`
-  modules. Before HTTP integration work or behavior changes requiring HTTP
-  coverage, read [tests/AGENTS.md](tests/AGENTS.md).
-- Unit and ordinary integration tests must not contact live Firebase, Firestore,
-  GitHub, or other network services. Emulator coverage remains conditional and
-  isolated in `tests/firestore_emulator.rs`.
-- Run the narrowest relevant target first, then `just fmt-check`, `just lint`,
-  `just test`, and `just check` as appropriate. Run `just test-emulators` for
-  Firestore emulator changes and `just docker-build` for container/runtime changes.
-
-### Mutation testing
+## Mutation testing
 
 - Run mutation testing when changing production logic or strengthening focused tests. Add tests for meaningful surviving mutants, not equivalent transformations, and keep generated mutation artifacts untracked.
 - Before starting a mutation run, check for active `cargo-mutants` and `just mutations` processes and inspect `mutants.out/lock.json`. The lock file persists after a completed run, so its presence alone does not mean the lock is held; never delete it to bypass a live OS lock or start a competing run. Mutation campaigns can legitimately take a long time, so allow an active healthy run to finish and report progress instead of interrupting it because of elapsed time alone.
@@ -162,18 +189,3 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Treat every missed mutant and timeout as unresolved. Rerun timeouts with `--iterate`, inspect their logs, and adjust timeout or skip configuration only after establishing that the outcome is a tooling limit, intentional hang, or equivalent mutation. Do not report a mutation campaign as clean while unexplained misses or timeouts remain.
 - Do not use `--baseline=skip` for local mutation testing. It is acceptable in CI only after the same checkout has passed the complete test suite; when skipping the baseline, set an explicit test timeout because cargo-mutants cannot derive one from baseline timing.
 - Reserve `--in-place` for disposable single-worker CI checkouts or targeted troubleshooting where reusing the existing target directory is more important than local parallelism; cargo-mutants does not support combining `--in-place` with `--jobs`. Before an `--in-place` run, record the working-tree state and ensure no editor, formatter, test, or second mutation process can modify the checkout concurrently. After the run, inspect `git diff` and search for `/* ~ changed by cargo-mutants ~ */`; if the run was interrupted or failed to restore a file, preserve the intended edits and remove only the mutation before continuing.
-
-## Agent skills and custom agents
-
-Portable repository skills live under `.agents/skills/` and each contains `SKILL.md` plus `agents/openai.yaml`. GitHub Copilot custom-agent profiles remain separately under `.github/agents/`.
-
-| Skill | Use when |
-|---|---|
-| `adversarial-testing` | Planning, writing, reviewing, or debugging tests at any layer |
-| `edit-agent-instructions` | Reviewing or editing root or nested agent instructions |
-| `axum-endpoint` | Creating or changing Axum routes and their HTTP contracts |
-| `pagination-endpoint` | Creating or changing cursor-paginated list endpoints |
-| `readme-maintenance` | Auditing human-facing README claims against the repository |
-| `rust-testing` | Applying Rust, Axum, fixture, emulator, and command conventions for tests |
-
-Keep skill frontmatter, directory names, UI metadata, paths, commands, and repository behavior aligned. Do not turn skills into generic persona prompts or duplicate large sections of this file.

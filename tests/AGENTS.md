@@ -1,6 +1,10 @@
 # HTTP integration test instructions
 
-The root `AGENTS.md` also applies. Use `adversarial-testing` and `rust-testing`.
+Scope: `tests/`. The root `AGENTS.md` also applies.
+Repository paths are root-relative. Run commands from the repository root unless
+another working directory is explicitly stated.
+
+Use `adversarial-testing` and `rust-testing`.
 Pure helper tests remain beside their modules in `src/`.
 
 - Exercise the composed router with `tower::ServiceExt::oneshot(...)`; do not
