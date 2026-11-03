@@ -185,6 +185,15 @@ async fn served_document_has_exact_inventory_security_statuses_and_media() {
         let operation = operation_at(&document, expected.path, expected.method);
         assert_eq!(operation["operationId"], expected.operation_id);
         assert!(operation_ids.insert(expected.operation_id));
+        for field in ["summary", "description"] {
+            assert!(
+                operation[field]
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "missing {field} for {}",
+                expected.operation_id
+            );
+        }
         assert_eq!(
             operation["security"],
             if expected.protected {

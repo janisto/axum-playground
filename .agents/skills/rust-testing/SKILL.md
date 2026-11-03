@@ -13,6 +13,10 @@ Read `AGENTS.md`, the implementation and callers under test, `tests/common/mod.r
 - Put HTTP contract tests under `tests/` and exercise `build_app(...)` or `build_app_with_routes(...)` with `tower::ServiceExt::oneshot(...)`.
 - Use `test_state()`, `test_state_with_github_service(...)`, or `test_state_with_auth_and_profile(...)` instead of rebuilding application state.
 - Decode bodies with `read_json_body(...)`, `read_cbor_body(...)`, or `read_text_body(...)` from `tests/common/mod.rs`.
+- Model actual Auth-emulator token envelopes with `alg: none` and an empty
+  signature. A signed-algorithm header with no signature does not establish
+  compatibility with emulator-issued tokens. Preserve production-mode guards
+  and issuer, audience, time, UID, and tenant validation.
 - Use service mocks for deterministic GitHub, authentication, and profile behavior. Reserve real Firestore SDK semantics for the conditional emulator test.
 
 Do not open network ports for ordinary tests, contact live services, add production test switches, use real credentials, or introduce sleeps for coordination.

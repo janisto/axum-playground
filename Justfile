@@ -46,6 +46,11 @@ container-smoke:
         | jq --exit-status '.message == "Hello, World!"'
     curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/openapi.json \
         | jq --exit-status '.openapi == "3.1.0" and (.paths["/v1/profile"].get.security == [{"bearerAuth":[]}])'
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/.well-known/api-catalog \
+        | jq --exit-status '.linkset[0]["service-desc"][0].href == "/openapi.json" and (.linkset[0]["service-doc"] | length) == 2'
+    curl --head --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/.well-known/api-catalog >/dev/null
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/llms.txt | cmp - llms.txt
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/llms-full.txt | cmp - llms-full.txt
     {{ CONTAINER_RUNTIME }} stop --time 10 "$container"
     {{ CONTAINER_RUNTIME }} inspect "$container" | jq --exit-status '.[0].State.ExitCode == 0'
 

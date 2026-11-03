@@ -69,6 +69,11 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/items", on(MethodFilter::GET, list_items_handler))
 }
 
+/// List the fixed item catalog.
+///
+/// Filters the deterministic catalog before cursor pagination. Follow the returned Link
+/// navigation and treat cursors as opaque; a cursor is scoped to the original category and
+/// limit. Unknown or repeated query parameters are rejected.
 #[utoipa::path(
     get,
     path = "/v1/items",

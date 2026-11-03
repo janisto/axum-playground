@@ -26,7 +26,9 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, a 30-second authentication-operation deadline, and emulator-mode support
 - Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, a 30-second persistence-operation deadline, and an audit-first one-time migration for the retired profile shape
 - Anonymous, credential-free GitHub transport with fixed API-version headers, manual same-origin redirects, strict projections, bounded bodies, and a single ten-second operation deadline
-- Health check endpoint at `/health`
+- Dependency-free liveness at `/health`, with typed catalog and OpenAPI links
+- RFC 9727 API catalog at `/.well-known/api-catalog` and same-build embedded
+  [usage index](llms.txt) and [complete API guide](llms-full.txt)
 
 ### API Design Principles
 
@@ -41,16 +43,18 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 | Method | Purpose | Success Status |
 | --- | --- | --- |
 | GET | Retrieve resource(s) | 200 OK |
-| POST | Create a resource | 201 Created |
+| POST | Create a profile or compute a greeting | 201 Created; 200 OK for hello |
 | PATCH | Partially update a resource | 200 OK |
 | DELETE | Remove a resource | 204 No Content |
 
 #### Error Responses
 
-Errors use the RFC 9457 Problem Details data model and honor content negotiation:
+Ordinary API errors use the RFC 9457 Problem Details data model and honor content negotiation:
 
 - `application/problem+json` when JSON is requested or selected by default
 - `application/cbor` when CBOR is selected by quality and specificity, including wildcard fallback after a more-specific JSON exclusion
+
+Schema, catalog, and usage-guide errors always use plain JSON Problem Details.
 
 `application/problem+cbor` is not a registered media type. The registered `application/concise-problem-details+cbor` type defines a different compact model and is not implemented here.
 
@@ -93,7 +97,7 @@ See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.r
 Copy `.env.example` to `.env` and customize as needed:
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 ```
 
 `just` commands auto-load `.env` through the repo Justfile. If you run `cargo` directly instead of `just`, export the environment variables yourself.
@@ -237,6 +241,9 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | GET | `/health` | Health check route |
 | GET | `/api-docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI document |
+| GET, HEAD | `/.well-known/api-catalog` | Typed links to schema, guides, and health |
+| GET | `/llms.txt` | Embedded usage index |
+| GET | `/llms-full.txt` | Embedded complete API usage guide |
 | GET | `/v1/hello` | Default greeting |
 | POST | `/v1/hello` | Create a personalized greeting |
 | GET | `/v1/items` | List items with cursor-based pagination |
@@ -250,6 +257,26 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | GET | `/v1/github/repos/{owner}/{repo}/activity` | List repository activity with cursor pagination |
 | GET | `/v1/github/repos/{owner}/{repo}/languages` | Get repository language totals |
 | GET | `/v1/github/repos/{owner}/{repo}/tags` | List repository tags with cursor pagination |
+
+### API discovery and usage guides
+
+Starting from an application origin, fetch `/.well-known/api-catalog`. Resolve
+its root-relative references against that retrieval URL to reach the running
+schema, both guides, and health. The catalog is an RFC 9727/RFC 9264 linkset
+with `application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"`.
+Its HEAD response retains GET metadata without a body. The schema and guides
+are GET-only; unsupported methods return 405 with truthful `Allow` values.
+
+The root [llms.txt](llms.txt) is a selective usage index; [llms-full.txt](llms-full.txt)
+is the self-contained guide for broad or offline reference. The binary embeds
+exactly those files and serves their bytes without runtime filesystem access,
+authentication, or dependency calls. API usage changes update them together
+with native Utoipa descriptions and tests. Schema, catalog, full-guide, and
+Swagger UI responses advertise the index through a typed `describedby` link.
+
+Documentation accepts no query parameters or request body. Unsupported success
+media return 406, and documentation errors always use JSON Problem Details.
+The catalog is not an `application/json` alias or a second operation schema.
 
 ### Development
 
@@ -291,7 +318,8 @@ Run `just --list` to see all available recipes.
 
 #### Mutation Testing
 
-Mutation testing is an explicit contributor campaign outside `just qa`. Run the
+Mutation testing uses the same Nextest runner and process isolation as `just test`.
+It is an explicit contributor campaign outside `just qa`. Run the
 full local campaign with four workers:
 
 ```bash

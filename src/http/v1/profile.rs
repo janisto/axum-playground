@@ -96,6 +96,12 @@ pub fn router() -> Router<Arc<AppState>> {
     )
 }
 
+/// Create the current user's profile.
+///
+/// Uses the verified Firebase UID and atomically creates only when that profile does not exist.
+/// Returns 201 with Location; 409 preserves the existing profile. After an uncertain write,
+/// read and reconcile rather than blindly retry; a conflict does not prove the intended
+/// creation succeeded.
 #[utoipa::path(
     post,
     path = "/v1/profile",
@@ -146,6 +152,11 @@ pub async fn create_profile_handler(
     }
 }
 
+/// Read the current user's profile.
+///
+/// Returns only the profile owned by the verified Firebase UID; the caller cannot select
+/// another owner. An absent profile returns 404, and an unavailable authentication or
+/// persistence dependency returns 503.
 #[utoipa::path(
     get,
     path = "/v1/profile",
@@ -175,6 +186,12 @@ pub async fn get_profile_handler(
     }
 }
 
+/// Update the current user's profile.
+///
+/// Requires a nonempty partial update for the verified Firebase UID. Omitted fields are
+/// preserved, explicit null is rejected, and unchanged values cause no write or timestamp
+/// change. After an uncertain write, read and reassess: repeating a patch may overwrite
+/// intervening changes.
 #[utoipa::path(
     patch,
     path = "/v1/profile",
@@ -220,6 +237,11 @@ pub async fn update_profile_handler(
     }
 }
 
+/// Delete the current user's profile.
+///
+/// Atomically deletes only the profile owned by the verified Firebase UID. Returns 204 without
+/// a body, then 404 if repeated after deletion. Responses are not replayed; another retry could
+/// delete a later recreation, so reconcile uncertain outcomes.
 #[utoipa::path(
     delete,
     path = "/v1/profile",

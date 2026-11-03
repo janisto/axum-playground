@@ -49,7 +49,13 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         negotiate_json_representation(&parts.headers)
             .map(Self)
-            .ok_or_else(|| problem_response(ProblemCode::NotAcceptable, &parts.headers))
+            .ok_or_else(|| {
+                crate::http::discovery::problem_for_path(
+                    ProblemCode::NotAcceptable,
+                    parts.uri.path(),
+                    &parts.headers,
+                )
+            })
     }
 }
 

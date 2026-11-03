@@ -162,7 +162,10 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Keep reusable application construction in `src/lib.rs` and `src/app.rs`. Tests and alternate composition use `build_app(...)` or `build_app_with_routes(...)` rather than rebuilding the middleware stack.
 - App-wide dependencies live in `AppState` behind `Arc<AppState>` and are passed through Axum state. Keep handlers stateless when they do not need services or configuration.
 - Put versioned route modules under `src/http/v1/`, export `pub fn router() -> Router<Arc<AppState>>`, merge them in `src/http/v1/mod.rs`, and add their documented handlers to `ApiDoc` in `src/http/v1/docs.rs`.
-- Keep `/health`, `/openapi.json`, and the optional `/api-docs` UI at the root. Keep business routes under `/v1`.
+- Keep `/health`, `/openapi.json`, `/.well-known/api-catalog`, `/llms.txt`, `/llms-full.txt`, and the optional `/api-docs` UI at the root. Keep business routes under `/v1`.
+- Update root `llms.txt` and `llms-full.txt` when API usage changes. Keep them
+  consistent with generated OpenAPI, native behavior, and local examples. Embed
+  and serve only the named public documents; do not expose repository directories.
 - Keep cross-cutting middleware centralized in `src/app.rs`. Preserve the `axum-observability` request correlation and terminal access logging layer, panic recovery, security headers, explicit HEAD handling, and operation-scoped body-limit boundaries unless the task explicitly changes their contract. CORS and a global application timeout are not enabled by default.
 - Preserve graceful shutdown through `tokio::select!` over Ctrl-C and Unix SIGTERM. The service must remain compatible with Cloud Run: bind `0.0.0.0:$PORT`, rely on platform TLS termination, and assume no persistent local filesystem.
 
@@ -173,7 +176,7 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Use `problem_response(...)` for controlled failures. Keep client details stable and safe; never expose internal errors, stack traces, credentials, or raw upstream bodies.
 - Treat malformed syntax and cursor encoding as 400, validation failures as 422, missing or invalid authentication as 401, conflicts as 409, and controlled upstream failures according to the existing service mapping.
 - Keep public JSON fields camelCase, using Serde renames when Rust naming differs. Keep Firestore storage naming separate from the HTTP contract.
-- Document every public handler with `#[utoipa::path(...)]`. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
+- Document every public business operation with `#[utoipa::path(...)]`. Keep schema, catalog, guide, and UI routes outside the fourteen-operation inventory. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
 - Preserve JSON as the default success representation and explicit `application/cbor` as the negotiated alternative on represented endpoints, including `/health`. JSON wins ties and wildcards; exact exclusions and RFC 9110 specificity remain authoritative. Unsupported modeled success representations return 406 before endpoint work. Bodyless 204 responses ignore `Accept`.
 - Accept request bodies only with exactly one `Content-Type` value of owned `application/json` or exact `application/cbor`; do not claim arbitrary `+cbor` media types. Accept `Content-Encoding` only when absent or a single `identity` value. Return Problem Details with 415 for unsupported or ambiguous media metadata, 400 for malformed JSON/CBOR, and 413 for the exact 1,000,000-byte limit. A CBOR request must contain exactly one data item.
 - Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.

@@ -11,6 +11,7 @@ Read `AGENTS.md`, then verify every affected `README.md` claim against the curre
 
 - runtime and versions: `Cargo.toml`, `Cargo.lock`, and `rust-toolchain.toml`;
 - application and routes: `src/main.rs`, `src/app.rs`, `src/http/health.rs`, and `src/http/v1/`;
+- consumer documentation: root `llms.txt`, `llms-full.txt`, and `src/http/discovery.rs`;
 - API behavior: `src/http/codec.rs`, `src/problem/`, `src/pagination/`, `src/auth/`, `src/services/`, and integration tests;
 - configuration and Firebase: `src/config.rs`, `.env.example`, `firebase.json`, and emulator tests;
 - commands and containers: `Justfile`, `Dockerfile`, and `cloudbuild.yaml`;
@@ -20,7 +21,9 @@ Read `AGENTS.md`, then verify every affected `README.md` claim against the curre
 
 - Require every named route, path, recipe, environment variable, version, and default to exist.
 - Keep the Rust pin aligned across the toolchain, manifest, workflows, container, and README.
-- Describe `/health` as the root liveness endpoint, `/openapi.json` as the OpenAPI document, and `/api-docs` as Swagger UI.
+- Describe `/health` as the root liveness endpoint, `/openapi.json` as the OpenAPI document, and `/api-docs` as Swagger UI. Include the root API catalog and exact embedded
+  usage guides, catalog GET/HEAD support, typed links, and plain JSON documentation
+  errors when those claims are affected.
 - State only the JSON and CBOR request or response behavior that the affected route implements. Reflect the current Problem Details media types without implying a standard the code does not implement.
 - Describe Firebase production verification, emulator configuration, Firestore-backed behavior, and Application Default Credentials according to the current code; do not imply all runtime configuration fields are already wired to every client.
 - Keep local development, emulator, container, Cloud Build, Cloud Run, CI, and coverage guidance aligned with committed commands and assets.
@@ -30,6 +33,9 @@ Read `AGENTS.md`, then verify every affected `README.md` claim against the curre
 
 ## Verification
 
-Dry-run named recipes where practical and inspect route registration, configuration, workflows, and container files directly. For a documentation-only change, validate paths, links, YAML where touched, and `git diff --check`; do not run mutating `just qa` solely for documentation.
+Dry-run named recipes where practical and inspect route registration, configuration, workflows, and container files directly. For documentation-only changes, validate paths, links, and affected YAML with
+read-only checks. Do not use mutating commands merely to validate documentation.
+Before committing, run the non-mutating `just qa` and `git diff --check` required
+by the root instructions.
 
 Reread the complete README before finishing and check for contradictory routes, versions, commands, environment behavior, skill counts, and discovery paths.
