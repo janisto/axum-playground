@@ -101,6 +101,11 @@ pub fn router() -> Router<Arc<AppState>> {
         )
 }
 
+/// Read a public GitHub owner.
+///
+/// Fetches an anonymous public-only projection from the fixed GitHub origin. Caller credentials
+/// are never forwarded; missing or inaccessible resources return controlled 404 responses.
+/// Quota failures return 429 with Retry-After, without a server retry.
 #[utoipa::path(
     get,
     path = "/v1/github/owners/{owner}",
@@ -136,6 +141,11 @@ pub async fn get_github_owner_handler(
     }
 }
 
+/// List an owner's public GitHub repositories.
+///
+/// Returns a public-only projection with opaque cursors scoped to the owner and original limit.
+/// Follow returned Link navigation; the live upstream view is not a snapshot. Caller
+/// credentials are not forwarded, and quota hints do not trigger server retries.
 #[utoipa::path(
     get,
     path = "/v1/github/owners/{owner}/repos",
@@ -188,6 +198,11 @@ pub async fn list_github_owner_repos_handler(
     }
 }
 
+/// Read a public GitHub repository.
+///
+/// Fetches an anonymous public-only repository projection. Private or inaccessible resources
+/// are not exposed and return a controlled 404. The fixed-origin client never forwards caller
+/// credentials or retries quota failures.
 #[utoipa::path(
     get,
     path = "/v1/github/repos/{owner}/{repo}",
@@ -230,6 +245,11 @@ pub async fn get_github_repo_handler(
     }
 }
 
+/// List public GitHub repository activity.
+///
+/// Returns newest-first public activity with opaque resource-and-limit-scoped cursors. Follow
+/// returned Link navigation; upstream changes can alter later pages. Caller credentials are not
+/// forwarded; honor Retry-After on quota rejection without assuming a snapshot.
 #[utoipa::path(
     get,
     path = "/v1/github/repos/{owner}/{repo}/activity",
@@ -294,6 +314,11 @@ pub async fn list_github_repo_activity_handler(
     }
 }
 
+/// Read public repository language totals.
+///
+/// Returns a deterministic ordering of language byte totals for a public repository. This
+/// operation is not paginated. Caller credentials are never forwarded; upstream failures are
+/// controlled and quota rejection does not trigger a server retry.
 #[utoipa::path(
     get,
     path = "/v1/github/repos/{owner}/{repo}/languages",
@@ -336,6 +361,11 @@ pub async fn get_github_repo_languages_handler(
     }
 }
 
+/// List public GitHub repository tags.
+///
+/// Returns public tags and commit identifiers with opaque cursors scoped to the repository and
+/// original limit. Follow returned Link navigation; the live view can change between pages.
+/// Caller credentials are not forwarded, and quota hints do not trigger server retries.
 #[utoipa::path(
     get,
     path = "/v1/github/repos/{owner}/{repo}/tags",

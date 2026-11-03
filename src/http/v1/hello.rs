@@ -39,6 +39,10 @@ pub fn router() -> Router<Arc<AppState>> {
     )
 }
 
+/// Read the default greeting.
+///
+/// Returns the fixed public greeting without calling application dependencies or storing data.
+/// No query parameters are accepted.
 #[utoipa::path(
     get,
     path = "/v1/hello",
@@ -65,6 +69,10 @@ pub async fn get_hello_handler(format: ResponseFormat, _query: NoQuery) -> Respo
     )
 }
 
+/// Compute a personalized greeting.
+///
+/// Accepts one validated name and returns a greeting with 200. The supplied name is preserved;
+/// no resource is created or stored, so repeating the same valid input has no persisted effect.
 #[utoipa::path(
     post,
     path = "/v1/hello",

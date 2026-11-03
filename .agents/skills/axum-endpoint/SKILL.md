@@ -21,8 +21,12 @@ Read `AGENTS.md`, the neighboring module under `src/http/v1/`, `src/http/v1/mod.
 - Return modeled bodies through `success_response(...)` or `success_response_with_headers(...)`. Use `no_content_response(...)` for 204 and shared helpers for `Location`, `Link`, and `Vary` behavior.
 - Return controlled failures through `problem_response(...)` or the existing service-error mapping. Keep internal and upstream details out of client responses.
 - Reuse validators in `src/validation.rs` before adding route-local validation. Treat malformed bodies as 400 and well-formed validation failures as 422.
-- Document every public operation with `#[utoipa::path(...)]`, including its external `/v1/...` path, tag, request body, implemented JSON and CBOR response media, headers, and reachable error statuses.
-- Add each documented handler import and path entry to `ApiDoc` in `src/http/v1/docs.rs`; route registration alone does not add it to the generated document.
+- Document every public business operation with `#[utoipa::path(...)]`, including its external `/v1/...` path, tag, request body, implemented JSON and CBOR response media, headers, and reachable error statuses.
+- Add each documented handler import and path entry to `ApiDoc` in `src/http/v1/docs.rs`; route registration alone does not add it to the generated document. Schema,
+  catalog, guide, and UI routes stay outside the fourteen-operation inventory.
+- Keep root usage guides, typed discovery links, and generated OpenAPI in sync
+  with changed usage. The catalog supports GET/HEAD; schema and guide routes are
+  GET-only. Their errors always use plain JSON Problem Details.
 
 ## Tests and validation
 

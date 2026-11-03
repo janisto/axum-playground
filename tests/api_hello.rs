@@ -307,6 +307,44 @@ async fn hello_media_metadata_and_accept_precedence_are_exact() {
         .unwrap();
     assert_eq!(charset.status(), StatusCode::OK);
 
+    for accept in [
+        "application/json;charset=UTF-8;q=1",
+        "application/json;q=1;charset=UTF-8",
+    ] {
+        let mut request = post(Body::from(br#"{"name":"Ada"}"#.as_slice()));
+        request
+            .headers_mut()
+            .insert(header::ACCEPT, accept.parse().unwrap());
+        let response = build_app(test_state()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{accept}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json;charset=utf-8"
+        );
+        assert_eq!(
+            read_json_body::<Greeting>(response).await.message,
+            "Hello, Ada!"
+        );
+    }
+    for accept in [
+        "application/json;unknown=value;q=1",
+        "application/json;q=1;unknown=value",
+        "application/cbor;unknown=value;q=1",
+        "application/cbor;q=1;unknown=value",
+    ] {
+        let mut request = post(Body::from(br#"{"name":"Ada"}"#.as_slice()));
+        request
+            .headers_mut()
+            .insert(header::ACCEPT, accept.parse().unwrap());
+        let response = build_app(test_state()).oneshot(request).await.unwrap();
+        problem(
+            response,
+            StatusCode::NOT_ACCEPTABLE,
+            ProblemCode::NotAcceptable,
+        )
+        .await;
+    }
+
     let negotiated = build_app(test_state())
         .oneshot(
             Request::builder()

@@ -2,7 +2,7 @@
 
 [![Build and tests](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-ci.yml?branch=main&label=build%20%26%20tests&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-ci.yml)
 [![Code quality](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-lint.yml?branch=main&label=code%20quality&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-lint.yml)
-[![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![Rust 1.99.1](https://img.shields.io/badge/Rust-1.99.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![MIT license](https://img.shields.io/github/license/janisto/axum-playground)](LICENSE)
 
 A public REST API example built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just). It is intentionally not deployed yet; the repository is the example and validation target.
@@ -26,7 +26,9 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 - Firebase Authentication with production JWKS verification, disabled and revoked user checks, a 30-second authentication-operation deadline, and emulator-mode support
 - Firestore-backed profile persistence with safe opaque-UID document keys, atomic lifecycle operations, a 30-second persistence-operation deadline, and an audit-first one-time migration for the retired profile shape
 - Anonymous, credential-free GitHub transport with fixed API-version headers, manual same-origin redirects, strict projections, bounded bodies, and a single ten-second operation deadline
-- Health check endpoint at `/health`
+- Dependency-free liveness at `/health`, with typed catalog and OpenAPI links
+- RFC 9727 API catalog at `/.well-known/api-catalog` and same-build embedded
+  [usage index](llms.txt) and [complete API guide](llms-full.txt)
 
 ### API Design Principles
 
@@ -41,16 +43,18 @@ It showcases `axum-observability`-based structured request logging, RFC 9457 Pro
 | Method | Purpose | Success Status |
 | --- | --- | --- |
 | GET | Retrieve resource(s) | 200 OK |
-| POST | Create a resource | 201 Created |
+| POST | Create a profile or compute a greeting | 201 Created; 200 OK for hello |
 | PATCH | Partially update a resource | 200 OK |
 | DELETE | Remove a resource | 204 No Content |
 
 #### Error Responses
 
-Errors use the RFC 9457 Problem Details data model and honor content negotiation:
+Ordinary API errors use the RFC 9457 Problem Details data model and honor content negotiation:
 
 - `application/problem+json` when JSON is requested or selected by default
 - `application/cbor` when CBOR is selected by quality and specificity, including wildcard fallback after a more-specific JSON exclusion
+
+Schema, catalog, and usage-guide errors always use plain JSON Problem Details.
 
 `application/problem+cbor` is not a registered media type. The registered `application/concise-problem-details+cbor` type defines a different compact model and is not implemented here.
 
@@ -74,7 +78,7 @@ Errors use the RFC 9457 Problem Details data model and honor content negotiation
 
 - JSON is the default and wins equal-quality ties.
 - CBOR is selected when it outranks JSON. A wildcard alone ties the representations and JSON wins, but a wildcard can select CBOR when a more-specific range excludes JSON, such as `application/json;q=0, application/*;q=1`.
-- Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
+- Exact exclusions and media-range specificity follow RFC 9110. Media parameters apply on either side of `q`. Unsupported success representations return 406 before endpoint work begins.
 - Request bodies must declare exactly one `Content-Type` value of `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, a CBOR body must contain exactly one data item, and `Content-Encoding` is limited to absent or a single `identity` value.
 - Problems use `application/problem+json` by default and `application/cbor` under the same quality and specificity rules. Error negotiation is best effort so an existing error is not replaced by a second 406.
 - Bodyless 204 responses ignore `Accept`.
@@ -93,7 +97,7 @@ See [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110), [RFC 8949](https://www.r
 Copy `.env.example` to `.env` and customize as needed:
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 ```
 
 `just` commands auto-load `.env` through the repo Justfile. If you run `cargo` directly instead of `just`, export the environment variables yourself.
@@ -105,9 +109,9 @@ cp .env.example .env
 | `PORT` | Server listen port | `8080` |
 | `FIREBASE_PROJECT_ID` | Firebase project ID and fallback Google project anchor | `demo-test-project` |
 | `APP_ENVIRONMENT` | Runtime environment: `development`, `test`, or `production` | `development` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
-| `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
-| `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | - |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Optional ADC override for future production access; local emulators do not use it | - |
+| `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | `127.0.0.1:7110` in `.env.example` |
+| `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | `127.0.0.1:7130` in `.env.example` |
 | `GOOGLE_CLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
 | `GCP_PROJECT` | Optional Google project fallback for Firestore | - |
 | `GCLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
@@ -115,7 +119,13 @@ cp .env.example .env
 
 Notes:
 
-- Emulator hosts must omit the protocol prefix and use loopback, for example `127.0.0.1:9099` and `127.0.0.1:8080`. Emulator configuration is rejected outside `development` and `test`.
+- Emulator hosts must omit the protocol prefix and use loopback. `.env.example`
+  and `firebase.json` use Auth at `127.0.0.1:7110` and Firestore at
+  `127.0.0.1:7130`. Configure both hosts together in `development` or `test`.
+  Firebase and the effective Firestore project must be the same `demo-*` project;
+  leave project fallbacks unset or set the effective fallback to that same project.
+  Partial pairs, remote hosts, live or mismatched projects, and production emulator
+  configuration fail before client creation.
 - Unknown `APP_ENVIRONMENT` values fail startup instead of silently selecting development behavior.
 - When `K_SERVICE` indicates Cloud Run, startup requires `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
@@ -129,26 +139,31 @@ Notes:
 
 ### Requirements
 
-- Rust 1.97.1 via `rust-toolchain.toml`
-- [Just](https://github.com/casey/just) 1.57.0
-- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.28.0 for local workflow checks
-- [Firebase CLI](https://firebase.google.com/docs/cli) and Java 21 when running emulator-backed tests
-- Podman or Docker for local image builds
+- Rust 1.99.1 via `rust-toolchain.toml`
+- [Just](https://github.com/casey/just) 1.59.0
+- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.32.0 for local workflow checks
+- Node.js 24.22.2 and Java 27 for the pinned Firebase CLI 15.34.2
+  emulator commands; this auxiliary CLI uses Node 24 because its `superstatic`
+  dependency does not support Node 26 yet. The application runs on Rust only.
+- Podman or Docker for local image builds, plus `curl` and `jq` for container smoke checks
 
-Install the workflow linters through Homebrew, as in `axum-observability`:
+Install actionlint through Homebrew and the current zizmor with Cargo:
 
 ```bash
-brew install actionlint zizmor
+brew install actionlint
+cargo install --locked zizmor --version 1.32.0
 ```
 
 The actionlint formula installs ShellCheck, which actionlint uses for embedded
 shell scripts. This repository does not require pyflakes because its workflows
 do not contain embedded Python scripts.
 
-Run `just install` to fetch the locked dependency graph and install the current
+Run `just install` to fetch the locked dependency graph and install the reviewed
 Cargo maintenance and QA tools: cargo-edit, cargo-nextest, cargo-llvm-cov,
-cargo-deny, cargo-audit, cargo-mutants, cargo-sort, and cargo-machete. Cargo
-selects each tool's latest release and uses that release's packaged lockfile.
+cargo-deny, cargo-audit, cargo-mutants, cargo-sort, cargo-machete, and zizmor.
+The `Justfile` pins each tool's full version and Cargo uses its packaged lockfile.
+Tool upgrades update the local and CI pins together after release review and validation.
+Ensure Cargo's binary directory precedes older copies of these tools in `PATH`.
 
 `just update` is intentionally comprehensive for this application. It upgrades
 all direct dependency requirements to their latest releases, including
@@ -158,13 +173,19 @@ manifest and source changes, then run `just qa` before committing them.
 
 ### Quick Start
 
-Choose either Application Default Credentials or the local Firebase emulators before starting. For local exploration of the public unauthenticated routes, the Auth emulator configuration keeps startup local:
+The example environment selects the local Firebase emulators. Google credentials
+and a GCP account are not needed. After copying `.env.example`, start the server:
 
 ```bash
-FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 just run
+just run
 ```
 
-Setting `FIREBASE_AUTH_EMULATOR_HOST` selects the loopback-only emulator verifier; the server validates those tokens locally and does not connect to the Auth emulator. Run the Auth emulator when you need it to issue test tokens. To exercise profile persistence, start the Firestore emulator as described below.
+Public routes work without the emulators running. For profile requests, start
+`just emulators` in another terminal; it runs Auth on `127.0.0.1:7110` and
+Firestore on `127.0.0.1:7130` with demo project `demo-test-project`.
+The Auth emulator issues local test tokens. Firestore's native emulator mode
+uses its stub credentials without reading ADC. Never enable emulator settings
+in production.
 
 Then visit:
 
@@ -220,6 +241,9 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | GET | `/health` | Health check route |
 | GET | `/api-docs` | Swagger UI |
 | GET | `/openapi.json` | OpenAPI document |
+| GET, HEAD | `/.well-known/api-catalog` | Typed links to schema, guides, and health |
+| GET | `/llms.txt` | Embedded usage index |
+| GET | `/llms-full.txt` | Embedded complete API usage guide |
 | GET | `/v1/hello` | Default greeting |
 | POST | `/v1/hello` | Create a personalized greeting |
 | GET | `/v1/items` | List items with cursor-based pagination |
@@ -234,6 +258,26 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | GET | `/v1/github/repos/{owner}/{repo}/languages` | Get repository language totals |
 | GET | `/v1/github/repos/{owner}/{repo}/tags` | List repository tags with cursor pagination |
 
+### API discovery and usage guides
+
+Starting from an application origin, fetch `/.well-known/api-catalog`. Resolve
+its root-relative references against that retrieval URL to reach the running
+schema, both guides, and health. The catalog is an RFC 9727/RFC 9264 linkset
+with `application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"`.
+Its HEAD response retains GET metadata without a body. The schema and guides
+are GET-only; unsupported methods return 405 with truthful `Allow` values.
+
+The root [llms.txt](llms.txt) is a selective usage index; [llms-full.txt](llms-full.txt)
+is the self-contained guide for broad or offline reference. The binary embeds
+exactly those files and serves their bytes without runtime filesystem access,
+authentication, or dependency calls. API usage changes update them together
+with native Utoipa descriptions and tests. Schema, catalog, full-guide, and
+Swagger UI responses advertise the index through a typed `describedby` link.
+
+Documentation accepts no query parameters or request body. Unsupported success
+media return 406, and documentation errors always use JSON Problem Details.
+The catalog is not an `application/json` alias or a second operation schema.
+
 ### Development
 
 #### Justfile Commands
@@ -242,8 +286,8 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | --- | --- |
 | `just build` | Build the application |
 | `just run` | Run the server |
-| `just install` | Fetch locked dependencies and install current Cargo maintenance and QA tools |
-| `just install-tools` | Install current Cargo maintenance and QA tools |
+| `just install` | Fetch locked dependencies and install pinned Cargo maintenance and QA tools |
+| `just install-tools` | Install pinned Cargo maintenance and QA tools |
 | `just download` | Fetch locked Cargo dependencies |
 | `just update` | Upgrade all direct requirements and refresh all locked transitive dependencies |
 | `just fmt` | Apply formatting |
@@ -252,10 +296,11 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just doc` | Build documentation with all rustdoc lints denied |
 | `just sort-check` | Verify grouped manifest ordering |
 | `just unused-dependencies` | Detect unused direct dependencies |
-| `just workflow-check` | Validate workflows with actionlint and zizmor |
+| `just workflow-check` | Validate workflows with actionlint and offline pedantic zizmor |
 | `just qa` | Run the non-mutating local quality gate |
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
+| `just emulators` | Start local Auth and Firestore emulators with the pinned CLI |
 | `just test-emulators` | Run the Firestore emulator test when configured |
 | `just test-emulators-ci` | Start the Firestore emulator, run its required integration test, and stop it |
 | `just mutations` | Run the explicit mutation-testing campaign |
@@ -266,13 +311,15 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just deny` | Run dependency policy checks |
 | `just audit` | Run dependency vulnerability checks |
 | `just docker-build` | Build the development image with Podman first, then Docker |
+| `just container-smoke` | Build and check the non-root read-only image over HTTP, then verify graceful shutdown |
 | `just lock` | Regenerate `Cargo.lock` |
 
 Run `just --list` to see all available recipes.
 
 #### Mutation Testing
 
-Mutation testing is an explicit contributor campaign outside `just qa`. Run the
+Mutation testing uses the same Nextest runner and process isolation as `just test`.
+It is an explicit contributor campaign outside `just qa`. Run the
 full local campaign with four workers:
 
 ```bash
@@ -309,7 +356,7 @@ just test-emulators-ci
 To reuse an emulator that is already running, export its host instead:
 
 ```bash
-export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:7130
 just test-emulators
 ```
 
@@ -422,7 +469,7 @@ Production runtime expectations:
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
 - Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
 - Coverage export through `just coverage-lcov` and `just coverage-html`
-- Container image buildability through `just docker-build` and the hosted `app-ci.yml` container job
+- Real non-root, read-only container startup, public HTTP probes, generated schema, and graceful shutdown through `just container-smoke`
 
 ### CI/CD
 
@@ -430,14 +477,15 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Description |
 | --- | --- |
-| `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, production container build, and coverage artifact generation |
-| `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
-| `workflow-security.yml` | Hosted zizmor workflow security analysis |
+| `app-ci.yml` | Quality checks gate builds, tests with coverage, Firestore emulator tests, and containers; independent actionlint and read-only pedantic zizmor feed the fail-closed `ci` aggregate |
+| `app-lint.yml` | Independent pure formatting and Clippy checks with minimal tool setup |
 | `labeler.yml` | Automatic pull request labeling |
 | `labeler-manual.yml` | Manual backfill labeling for historical pull requests |
 | `dependabot-auto-merge.yml` | Auto-merge Dependabot minor and patch updates |
 
-Dependabot configuration lives in `.github/dependabot.yml`, and label rules live in `.github/labeler.yml`.
+Dependabot version checks remain quarterly. Configuration lives in
+`.github/dependabot.yml`, and label rules live in `.github/labeler.yml`.
+Validation runs on PRs and main pushes, without scheduled validation.
 
 ## License
 

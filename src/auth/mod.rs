@@ -12,11 +12,10 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     response::Response,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use google_cloud_auth::credentials::{AccessTokenCredentials, Builder as CredentialsBuilder};
 use jsonwebtoken::{
-    Algorithm, DecodingKey, Header, Validation,
-    dangerous::insecure_decode,
-    decode, decode_header,
+    Algorithm, DecodingKey, Header, Validation, decode, decode_header,
     errors::{Error as JwtError, ErrorKind as JwtErrorKind},
 };
 use reqwest::Client;
@@ -158,6 +157,11 @@ struct IdentityPlatformLookupClient {
 #[derive(Clone, Debug)]
 pub struct AuthenticatedUser(pub FirebaseUser);
 
+#[derive(Deserialize)]
+struct EmulatorTokenHeader {
+    alg: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct FirebaseClaims {
     sub: String,
@@ -213,15 +217,10 @@ struct IdentityLookupUser {
 
 impl AuthVerifier {
     pub fn from_config(config: &AppConfig) -> Result<Self, StartupError> {
+        config.validate_emulators()?;
         let project_id = config.firebase_project_id.clone();
 
-        if let Some(host) = config.firebase_auth_emulator_host.as_deref() {
-            if !config.emulator_host_is_loopback(host) {
-                return Err(StartupError::UnsafeEmulatorHost {
-                    variable: "FIREBASE_AUTH_EMULATOR_HOST",
-                    host: host.to_owned(),
-                });
-            }
+        if config.firebase_auth_emulator_host.is_some() {
             return Ok(Self {
                 inner: Arc::new(AuthVerifierInner::Emulator(Box::new(
                     EmulatorAuthVerifier { project_id },
@@ -540,9 +539,39 @@ impl CachedJwks {
 
 impl EmulatorAuthVerifier {
     async fn verify(&self, token: &str) -> Result<FirebaseUser, AuthError> {
-        let claims = insecure_decode::<FirebaseClaims>(token)
-            .map(|data| data.claims)
-            .map_err(map_jwt_error)?;
+        let mut segments = token.split('.');
+        let (Some(header), Some(payload), Some(signature), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
+            return Err(AuthError::InvalidToken);
+        };
+        let header: EmulatorTokenHeader = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(header)
+                .map_err(|_| AuthError::InvalidToken)?,
+        )
+        .map_err(|_| AuthError::InvalidToken)?;
+        // Firebase's local emulator emits unsecured JWS. This path is selected
+        // only after the development/test and loopback configuration checks.
+        if header.alg == "none" {
+            if !signature.is_empty() {
+                return Err(AuthError::InvalidToken);
+            }
+        } else {
+            header
+                .alg
+                .parse::<Algorithm>()
+                .map_err(|_| AuthError::InvalidToken)?;
+        }
+        let claims = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(payload)
+                .map_err(|_| AuthError::InvalidToken)?,
+        )
+        .map_err(|_| AuthError::InvalidToken)?;
 
         validate_common_claims(&claims, &self.project_id)?;
 
@@ -975,6 +1004,7 @@ mod tests {
         ));
 
         config.app_environment = crate::config::AppEnvironment::Development;
+        config.firestore_emulator_host = Some("127.0.0.1:7130".to_owned());
         assert!(AuthVerifier::from_config(&config).is_ok());
     }
 
@@ -1454,7 +1484,7 @@ mod tests {
 
         let token = unsigned_token(
             json!({
-                "alg": "RS256",
+                "alg": "none",
                 "typ": "JWT"
             }),
             json!({
@@ -1477,13 +1507,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emulator_verifier_rejects_malformed_envelopes_and_validates_signed_token_claims() {
+        let verifier = EmulatorAuthVerifier {
+            project_id: "demo-test-project".to_owned(),
+        };
+        let now = super::unix_timestamp_now();
+        let claims = json!({"sub":"user-123", "aud":"demo-test-project", "iss":expected_issuer("demo-test-project"), "iat":now, "auth_time":now, "exp":now+3600});
+        let valid = unsigned_token(json!({"alg":"none", "typ":"JWT"}), claims.clone());
+        for malformed in [
+            "not-a-jwt".to_owned(),
+            format!("{valid}.extra"),
+            format!("{valid}unexpected-signature"),
+            format!("%.{}.", valid.split('.').nth(1).expect("payload")),
+            format!("{}.%.", valid.split('.').next().expect("header")),
+            unsigned_token(json!({"alg":"unsupported"}), claims.clone()),
+            unsigned_token(json!({"alg":42}), claims.clone()),
+            unsigned_token(json!({}), claims.clone()),
+            unsigned_token(json!({"alg":"none"}), json!({"sub":"user-123"})),
+        ] {
+            assert_eq!(
+                verifier.verify(&malformed).await,
+                Err(AuthError::InvalidToken)
+            );
+        }
+        let signed_shape = unsigned_token(json!({"alg":"RS256", "typ":"JWT"}), claims);
+        assert_eq!(
+            verifier
+                .verify(&signed_shape)
+                .await
+                .expect("emulator signed-token shape")
+                .uid,
+            "user-123"
+        );
+    }
+
+    #[tokio::test]
     async fn emulator_verifier_rejects_tenant_tokens_when_tenancy_is_not_supported() {
         let verifier = EmulatorAuthVerifier {
             project_id: "demo-test-project".to_owned(),
         };
         let now = super::unix_timestamp_now();
         let token = unsigned_token(
-            json!({"alg": "RS256", "typ": "JWT"}),
+            json!({"alg": "none", "typ": "JWT"}),
             json!({
                 "sub": "tenant-user",
                 "aud": "demo-test-project",
@@ -1507,7 +1572,7 @@ mod tests {
 
         let token = unsigned_token(
             json!({
-                "alg": "RS256",
+                "alg": "none",
                 "typ": "JWT"
             }),
             json!({
@@ -1536,7 +1601,7 @@ mod tests {
 
         let token = unsigned_token(
             json!({
-                "alg": "RS256",
+                "alg": "none",
                 "typ": "JWT"
             }),
             json!({

@@ -14,13 +14,18 @@ pub struct Health {
     pub status: &'static str,
 }
 
+/// Return service liveness.
+///
+/// Returns the fixed healthy status without authentication, persistence, or outbound calls.
+/// This does not report Firebase or GitHub readiness; JSON and CBOR have the same liveness
+/// meaning.
 #[utoipa::path(
     get,
     path = "/health",
     operation_id = "getHealth",
     security(()),
     responses(
-        (status = 200, description = "Service liveness", content(
+        (status = 200, description = "Service liveness", headers(("Link" = String, description = "Typed API catalog and OpenAPI discovery links")), content(
             (Health = "application/json"),
             (Health = "application/cbor")
         )),

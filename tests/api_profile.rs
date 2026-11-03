@@ -440,6 +440,81 @@ async fn profile_route_query_negotiation_size_and_auth_order_is_fail_closed() {
 }
 
 #[tokio::test]
+async fn unacceptable_profile_media_parameters_do_not_authenticate_or_mutate() {
+    let operations = [
+        ProfileOperation::Create,
+        ProfileOperation::Get,
+        ProfileOperation::Update,
+        ProfileOperation::Delete,
+    ];
+    for (method, body) in [
+        (Method::POST, CREATE),
+        (Method::PATCH, r#"{"firstName":"Grace"}"#),
+    ] {
+        for accept in [
+            "application/json;charset=latin1;q=1",
+            "application/json;q=1;charset=latin1",
+            "application/cbor;charset=utf-8;q=1",
+            "application/cbor;q=1;charset=utf-8",
+        ] {
+            let auth = MockAuthVerifier::test_user();
+            let store = MockProfileService::default();
+            let app = build_app(state_with(
+                auth.clone(),
+                MockGitHubService::demo(),
+                store.clone(),
+            ));
+            if method == Method::PATCH {
+                let created = app
+                    .clone()
+                    .oneshot(authorized_json(Method::POST, CREATE))
+                    .await
+                    .unwrap();
+                assert_eq!(created.status(), StatusCode::CREATED);
+            }
+            let previous = store.stored_profile("user-123");
+            let previous_auth = auth.call_count();
+            let previous_writes = store.committed_write_count();
+            let previous_operations = operations.map(|operation| store.operation_count(operation));
+            let mut request = authorized_json(method.clone(), body);
+            request
+                .headers_mut()
+                .insert(header::ACCEPT, accept.parse().unwrap());
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                (
+                    response.status(),
+                    auth.call_count(),
+                    store.committed_write_count()
+                ),
+                (StatusCode::NOT_ACCEPTABLE, previous_auth, previous_writes),
+                "{method} {accept}"
+            );
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            assert_problem(
+                response,
+                StatusCode::NOT_ACCEPTABLE,
+                ProblemCode::NotAcceptable,
+            )
+            .await;
+            assert_eq!(
+                operations.map(|operation| store.operation_count(operation)),
+                previous_operations,
+                "{method} {accept}"
+            );
+            assert_eq!(
+                store.stored_profile("user-123"),
+                previous,
+                "{method} {accept}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn profile_validation_and_parse_failures_do_not_reach_persistence() {
     let schema_cases = [
         r#"{}"#,

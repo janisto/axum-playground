@@ -43,7 +43,7 @@ async fn health_returns_the_exact_json_and_cbor_liveness_document() {
     assert_eq!(json.status(), StatusCode::OK);
     assert_eq!(json.headers()[header::CONTENT_TYPE], "application/json");
     assert_common_headers(&json, true);
-    for forbidden in [header::LOCATION, header::LINK, header::WWW_AUTHENTICATE] {
+    for forbidden in [header::LOCATION, header::WWW_AUTHENTICATE] {
         assert!(!json.headers().contains_key(forbidden));
     }
     assert_eq!(

@@ -14,6 +14,10 @@ pub enum StartupError {
     AuthCredentialsInitialization,
     #[error("failed to initialize authentication HTTP client")]
     AuthHttpClientInitialization,
+    #[error(
+        "Firebase emulators require paired loopback hosts and one matching demo-* project in development or test"
+    )]
+    InvalidEmulatorConfiguration,
     #[error("unsafe emulator configuration for {variable}: {host}")]
     UnsafeEmulatorHost {
         variable: &'static str,

@@ -248,11 +248,9 @@ pub async fn run_profile_migration(
     config: &AppConfig,
     mode: ProfileMigrationMode,
 ) -> Result<ProfileMigrationReport, ProfileMigrationError> {
-    if let Some(host) = config.firestore_emulator_host.as_deref()
-        && !config.emulator_host_is_loopback(host)
-    {
-        return Err(migration_error(ProfileMigrationErrorKind::Initialize, None));
-    }
+    config.validate_emulators().map_err(|error| {
+        migration_error_with_source(ProfileMigrationErrorKind::Initialize, None, error)
+    })?;
     let project_id = config.resolved_google_project_id();
     if let ProfileMigrationMode::Apply { confirmed_project } = &mode
         && confirmed_project != project_id
@@ -1280,41 +1278,51 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn unsafe_emulator_configuration_fails_before_initializing_a_client() {
-        let config = AppConfig {
+    fn emulator_config() -> AppConfig {
+        AppConfig {
             port: 8080,
-            firebase_project_id: "test".to_owned(),
-            app_environment: crate::AppEnvironment::Production,
+            firebase_project_id: "demo-configured-project".to_owned(),
+            app_environment: crate::AppEnvironment::Development,
             google_application_credentials: None,
-            firebase_auth_emulator_host: None,
-            firestore_emulator_host: Some("firestore.example:8080".to_owned()),
+            firebase_auth_emulator_host: Some("127.0.0.1:7110".to_owned()),
+            firestore_emulator_host: Some("127.0.0.1:7130".to_owned()),
             google_cloud_project: None,
             gcp_project: None,
             gcloud_project: None,
             project_id: None,
-        };
-        let error = run_profile_migration(&config, ProfileMigrationMode::Audit)
+        }
+    }
+
+    #[tokio::test]
+    async fn unsafe_emulator_configuration_fails_before_initializing_a_client() {
+        let mut remote = emulator_config();
+        remote.app_environment = crate::AppEnvironment::Production;
+        remote.firestore_emulator_host = Some("firestore.example:8080".to_owned());
+        let mut auth_only = emulator_config();
+        auth_only.firestore_emulator_host = None;
+        let mut live_project = emulator_config();
+        live_project.firebase_project_id = "live-project".to_owned();
+        let mut live_override = emulator_config();
+        live_override.google_cloud_project = Some("live-project".to_owned());
+        for config in [remote, auth_only, live_project, live_override] {
+            let error = run_profile_migration(
+                &config,
+                ProfileMigrationMode::Apply {
+                    confirmed_project: "never-confirmed-project".to_owned(),
+                },
+            )
             .await
-            .expect_err("unsafe emulator host must fail");
-        assert_eq!(error.kind(), ProfileMigrationErrorKind::Initialize);
-        assert!(error.report().is_none());
+            .expect_err(
+                "configuration validation must precede project confirmation and client creation",
+            );
+            assert_eq!(error.kind(), ProfileMigrationErrorKind::Initialize);
+            assert!(error.report().is_none());
+        }
     }
 
     #[tokio::test]
     async fn safe_emulator_host_reaches_confirmation_before_initializing_a_client() {
-        let config = AppConfig {
-            port: 8080,
-            firebase_project_id: "configured-project".to_owned(),
-            app_environment: crate::AppEnvironment::Development,
-            google_application_credentials: None,
-            firebase_auth_emulator_host: None,
-            firestore_emulator_host: Some("127.0.0.1:8080".to_owned()),
-            google_cloud_project: None,
-            gcp_project: None,
-            gcloud_project: None,
-            project_id: None,
-        };
+        let config = emulator_config();
         let error = run_profile_migration(
             &config,
             ProfileMigrationMode::Apply {

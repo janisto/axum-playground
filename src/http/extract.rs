@@ -7,7 +7,10 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 
-use crate::problem::{ProblemCode, problem_response};
+use crate::{
+    http::discovery::problem_for_path,
+    problem::{ProblemCode, problem_response},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClosedQueryError;
@@ -48,13 +51,19 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let query = parse_query(parts.uri.query())
-            .map_err(|_| problem_response(ProblemCode::InvalidRequest, &parts.headers))?;
+        let query = parse_query(parts.uri.query()).map_err(|_| {
+            problem_for_path(
+                ProblemCode::InvalidRequest,
+                parts.uri.path(),
+                &parts.headers,
+            )
+        })?;
         if query.is_empty() {
             Ok(Self)
         } else {
-            Err(problem_response(
+            Err(problem_for_path(
                 ProblemCode::InvalidRequest,
+                parts.uri.path(),
                 &parts.headers,
             ))
         }

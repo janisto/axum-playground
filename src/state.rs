@@ -66,6 +66,45 @@ mod tests {
     use super::AppState;
 
     #[test]
+    fn runtime_and_service_constructors_reject_mixed_emulator_configuration() {
+        let config = AppConfig {
+            port: 8080,
+            firebase_project_id: "demo-test-project".to_owned(),
+            app_environment: AppEnvironment::Development,
+            google_application_credentials: Some("/no-google-credentials.json".to_owned()),
+            firebase_auth_emulator_host: Some("127.0.0.1:7110".to_owned()),
+            firestore_emulator_host: Some("127.0.0.1:7130".to_owned()),
+            google_cloud_project: None,
+            gcp_project: None,
+            gcloud_project: None,
+            project_id: None,
+        };
+        let mut auth_only = config.clone();
+        auth_only.firestore_emulator_host = None;
+        let mut live_project = config.clone();
+        live_project.firebase_project_id = "live-project".to_owned();
+        let mut live_override = config.clone();
+        live_override.google_cloud_project = Some("live-project".to_owned());
+        for (name, invalid) in [
+            ("Auth only", auth_only),
+            ("live Firebase project", live_project),
+            ("live Firestore override", live_override),
+        ] {
+            assert!(AppState::new(invalid.clone()).is_err(), "runtime: {name}");
+            assert!(AuthVerifier::from_config(&invalid).is_err(), "auth: {name}");
+            assert!(
+                ProfileService::firestore(&invalid).is_err(),
+                "Firestore: {name}"
+            );
+        }
+        for environment in [AppEnvironment::Development, AppEnvironment::Test] {
+            let mut valid = config.clone();
+            valid.app_environment = environment;
+            assert!(AppState::new(valid).is_ok());
+        }
+    }
+
+    #[test]
     fn runtime_state_rejects_non_loopback_firestore_emulator() {
         let config = AppConfig {
             port: 8080,

@@ -211,6 +211,7 @@ impl ProblemDetails {
         let mut response = Response::builder()
             .status(problem.code.status())
             .header(header::CONTENT_TYPE, representation.problem_content_type())
+            .header(header::CONTENT_LENGTH, payload.len())
             .body(Body::from(payload))
             .expect("Problem Details response should build");
         ensure_vary(response.headers_mut(), ["Accept"]);

@@ -44,7 +44,7 @@ const PHONE_NUMBER_INPUT_PATTERN: &str = r"^[\t-\r ]*\+[1-9][0-9]{6,14}[\t-\r ]*
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Axum Portable API", version = "1.0.0"),
+    info(title = "Axum Portable API"),
     paths(
         health_handler,
         get_hello_handler,
@@ -90,7 +90,6 @@ async fn openapi_handler(format: JsonResponseFormat, _query: NoQuery) -> Respons
 pub fn openapi_document() -> Value {
     let mut document =
         serde_json::to_value(ApiDoc::openapi()).expect("generated OpenAPI should serialize");
-    document["openapi"] = json!("3.1.0");
     document["jsonSchemaDialect"] = json!("https://spec.openapis.org/oas/3.1/dialect/base");
     document["components"]["securitySchemes"]["bearerAuth"] = json!({
         "type": "http",

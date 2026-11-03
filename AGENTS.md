@@ -13,6 +13,12 @@ human users and contributors. Do not duplicate agent instructions into it.
   Simplify unnecessary behavior instead of adding machinery to defend it.
 - State the failure mode before architectural, security, persistence, or
   production-impacting changes.
+- Evaluate dependency updates and ongoing ownership before choosing a workaround.
+  Do not add dependency source patches, vendored forks, or runtime monkey-patches.
+  Keep ordinary installs and Dependabot updates working without patch cleanup.
+  Prefer supported native behavior and document non-blocking upstream limitations.
+  If a fix changes agreed guarantees or its maintenance cost is uncertain, present
+  the evidence and ask the user before implementation.
 - Report implementation, validation, and remaining risks before completion.
 - Keep instructions, comments, and documentation concise. Explain and obtain
   explicit approval before removing, merging, or relocating guidance, including
@@ -108,6 +114,10 @@ Keep skill frontmatter, directory names, UI metadata, paths, commands, and repos
 This example is not deployed; GCP is a possible future target. Keep manual
 deployment examples project-agnostic and do not deploy on pushes, PRs, or merges.
 
+- Do not introduce or enable extra workflows, CI jobs, automated maintenance tasks,
+  or recurring triggers without explicit maintainer permission. Modernization and
+  alignment do not grant that permission. Keep ordinary validation on push/PR
+  events and Dependabot version checks quarterly to limit alerts and maintenance.
 - Keep required `ci` and independent pure `lint` checks. Preserve early lint
   feedback and fail CI when a mandatory validation result is not successful.
 - Before workflow changes, use Chrome to inspect GitHub Settings > Rules >
@@ -135,7 +145,15 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
 - Keep `Cargo.lock` checked in and never edit it manually. Use `cargo update` or `just lock` only for intentional dependency-resolution changes. If unrelated lockfile churn appears, stop instead of hand-editing it away.
-- Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Keep Cargo CLI tool installs aligned between the `Justfile` and workflows; use each tool release's packaged lockfile without hard-coding tool versions that Dependabot cannot maintain.
+- Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution
+  in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Pin Cargo CLI tools to
+  reviewed full versions in the `Justfile` and workflows, install with `--locked`,
+  and update matching pins together during deliberate tool upgrades. Dependabot
+  maintains the application graph, not these standalone tool selections.
+- For an adopted protocol, verify the latest upstream specification independently
+  of its SDK version. Before 1.0, target the latest implementable upstream draft;
+  inspect the selected library's actual support and report concrete blockers.
+  Finding a newer protocol or draft does not authorize adopting a new capability.
 - Avoid new dependencies when the standard library or an existing crate fits. Prefer actively maintained, well-documented crates and justify additions against a concrete feature need.
 
 ## Application architecture
@@ -144,7 +162,10 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Keep reusable application construction in `src/lib.rs` and `src/app.rs`. Tests and alternate composition use `build_app(...)` or `build_app_with_routes(...)` rather than rebuilding the middleware stack.
 - App-wide dependencies live in `AppState` behind `Arc<AppState>` and are passed through Axum state. Keep handlers stateless when they do not need services or configuration.
 - Put versioned route modules under `src/http/v1/`, export `pub fn router() -> Router<Arc<AppState>>`, merge them in `src/http/v1/mod.rs`, and add their documented handlers to `ApiDoc` in `src/http/v1/docs.rs`.
-- Keep `/health`, `/openapi.json`, and the optional `/api-docs` UI at the root. Keep business routes under `/v1`.
+- Keep `/health`, `/openapi.json`, `/.well-known/api-catalog`, `/llms.txt`, `/llms-full.txt`, and the optional `/api-docs` UI at the root. Keep business routes under `/v1`.
+- Update root `llms.txt` and `llms-full.txt` when API usage changes. Keep them
+  consistent with generated OpenAPI, native behavior, and local examples. Embed
+  and serve only the named public documents; do not expose repository directories.
 - Keep cross-cutting middleware centralized in `src/app.rs`. Preserve the `axum-observability` request correlation and terminal access logging layer, panic recovery, security headers, explicit HEAD handling, and operation-scoped body-limit boundaries unless the task explicitly changes their contract. CORS and a global application timeout are not enabled by default.
 - Preserve graceful shutdown through `tokio::select!` over Ctrl-C and Unix SIGTERM. The service must remain compatible with Cloud Run: bind `0.0.0.0:$PORT`, rely on platform TLS termination, and assume no persistent local filesystem.
 
@@ -155,7 +176,7 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Use `problem_response(...)` for controlled failures. Keep client details stable and safe; never expose internal errors, stack traces, credentials, or raw upstream bodies.
 - Treat malformed syntax and cursor encoding as 400, validation failures as 422, missing or invalid authentication as 401, conflicts as 409, and controlled upstream failures according to the existing service mapping.
 - Keep public JSON fields camelCase, using Serde renames when Rust naming differs. Keep Firestore storage naming separate from the HTTP contract.
-- Document every public handler with `#[utoipa::path(...)]`. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
+- Document every public business operation with `#[utoipa::path(...)]`. Keep schema, catalog, guide, and UI routes outside the fourteen-operation inventory. Keep external paths, tags, request bodies, statuses, headers, and implemented JSON/CBOR media types aligned with runtime behavior and the OpenAPI document.
 - Preserve JSON as the default success representation and explicit `application/cbor` as the negotiated alternative on represented endpoints, including `/health`. JSON wins ties and wildcards; exact exclusions and RFC 9110 specificity remain authoritative. Unsupported modeled success representations return 406 before endpoint work. Bodyless 204 responses ignore `Accept`.
 - Accept request bodies only with exactly one `Content-Type` value of owned `application/json` or exact `application/cbor`; do not claim arbitrary `+cbor` media types. Accept `Content-Encoding` only when absent or a single `identity` value. Return Problem Details with 415 for unsupported or ambiguous media metadata, 400 for malformed JSON/CBOR, and 413 for the exact 1,000,000-byte limit. A CBOR request must contain exactly one data item.
 - Keep JSON problems as `application/problem+json`. Encode the same Problem Details data model as generic `application/cbor` only when CBOR is explicitly preferred. Do not restore the unregistered `application/problem+cbor` type or claim `application/concise-problem-details+cbor` without implementing its different model.
@@ -176,7 +197,7 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Preserve production Firebase verification: RS256 Google keys, issuer and audience checks, Identity Platform lookup, and disabled or revoked-user handling. This application is not tenant-aware, so reject tokens carrying `firebase.tenant` rather than looking the UID up in the root project. Missing or malformed revocation metadata is an authentication dependency failure, never evidence that a token is valid. Preserve the explicit emulator path when `FIREBASE_AUTH_EMULATOR_HOST` is configured.
 - Use mock services for deterministic tests and the Firestore-backed profile service only when persistence semantics are under test. Preserve create-if-absent, ownership, audit, and timestamp behavior in the service layer. Derive Firestore profile document IDs with the shared prefixed Base64URL helper; Firebase UIDs are opaque and may contain Firestore path delimiters.
 - Keep runtime configuration in environment variables and `AppConfig`. Never commit or log credentials, tokens, service-account paths, authorization values, profile data, or other PII. Prefer Application Default Credentials and workload identity in deployed environments.
-- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments. When `K_SERVICE` identifies Cloud Run, require `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
+- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Emulator mode requires paired loopback Auth and Firestore hosts in development/test and one matching `demo-*` project for Firebase and the effective Firestore project. Reject partial pairs, live or mismatched project overrides, and production emulator use before constructing clients. When `K_SERVICE` identifies Cloud Run, require `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - Keep request logs and trace correlation in `axum-observability`. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 

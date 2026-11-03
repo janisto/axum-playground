@@ -13,7 +13,7 @@ use axum_observability::ObservabilityLayer;
 use tower::ServiceBuilder;
 
 use crate::{
-    http::{codec::MAX_REQUEST_BODY_SIZE_BYTES, health, v1},
+    http::{codec::MAX_REQUEST_BODY_SIZE_BYTES, discovery, health, v1},
     middleware::{recover::panic_recovery_middleware, security::security_headers_middleware},
     problem::{ProblemCode, problem_response},
     state::AppState,
@@ -28,6 +28,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
     Router::new()
         .route("/health", on(MethodFilter::GET, health::health_handler))
         .merge(v1::docs::router())
+        .merge(discovery::router())
         .merge(v1::docs::ui_router())
         .nest("/v1", v1::router())
         .merge(extra_routes)
@@ -39,6 +40,7 @@ pub fn build_app_with_routes(state: Arc<AppState>, extra_routes: Router<Arc<AppS
                 .layer(from_fn(empty_head_response_body))
                 .layer(from_fn(security_headers_middleware))
                 .layer(from_fn(panic_recovery_middleware))
+                .layer(from_fn(discovery::discovery_links_middleware))
                 .layer(from_fn(portable_head_rejection_middleware))
                 .layer(from_fn(declared_body_size_middleware)),
         )
@@ -101,7 +103,11 @@ async fn not_found_handler(request: Request) -> Response {
 }
 
 async fn method_not_allowed_handler(request: Request) -> Response {
-    let mut response = problem_response(ProblemCode::MethodNotAllowed, request.headers());
+    let mut response = discovery::problem_for_path(
+        ProblemCode::MethodNotAllowed,
+        request.uri().path(),
+        request.headers(),
+    );
     if let Some(allowed) = portable_allow(request.uri().path()) {
         response.headers_mut().insert(header::ALLOW, allowed);
     }
@@ -110,7 +116,7 @@ async fn method_not_allowed_handler(request: Request) -> Response {
 
 fn portable_allow(path: &str) -> Option<HeaderValue> {
     let value = match path {
-        "/health" | "/v1/items" | "/openapi.json" => "GET",
+        "/health" | "/v1/items" | "/openapi.json" | "/llms.txt" | "/llms-full.txt" => "GET",
         "/v1/hello" => "GET, POST",
         "/v1/profile" => "GET, POST, PATCH, DELETE",
         path if is_github_path(path) => "GET",

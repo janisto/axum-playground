@@ -87,18 +87,22 @@ fn choose_representation(
     json_media_type: &str,
 ) -> Option<Representation> {
     let candidates = [
-        (Representation::Json, json_media_type, false),
-        (Representation::JsonUtf8, json_media_type, true),
-        (Representation::Cbor, CBOR_MEDIA_TYPE, false),
+        (Representation::Json, json_media_type, &[][..]),
+        (
+            Representation::JsonUtf8,
+            json_media_type,
+            &[("charset", "utf-8")][..],
+        ),
+        (Representation::Cbor, CBOR_MEDIA_TYPE, &[][..]),
     ];
 
     let mut selected = None;
     let mut selected_quality = 0.0;
-    for (representation, media_type, charset) in candidates {
+    for (representation, media_type, parameters) in candidates {
         if representation == Representation::Cbor && !allow_cbor {
             continue;
         }
-        let quality = effective_quality(ranges, media_type, charset).unwrap_or(0.0);
+        let quality = effective_quality(ranges, media_type, parameters).unwrap_or(0.0);
         if quality > selected_quality {
             selected = Some(representation);
             selected_quality = quality;
@@ -110,14 +114,14 @@ fn choose_representation(
 fn effective_quality(
     ranges: &[ParsedRange],
     media_type: &str,
-    with_utf8_charset: bool,
+    parameters: &[(&str, &str)],
 ) -> Option<f32> {
     let mut best: Option<Match> = None;
     for range in ranges {
         let Some(specificity) = range_specificity(&range.media_type, media_type) else {
             continue;
         };
-        if !range_parameters_match(&range.media_parameters, with_utf8_charset) {
+        if !range_parameters_match(&range.media_parameters, parameters) {
             continue;
         }
         let current = Match {
@@ -141,14 +145,28 @@ fn effective_quality(
     best.map(|value| value.quality)
 }
 
-fn range_parameters_match(parameters: &[(String, String)], with_utf8_charset: bool) -> bool {
-    match parameters {
-        [] => true,
-        [(name, value)] => {
-            with_utf8_charset && name == "charset" && value.eq_ignore_ascii_case("utf-8")
-        }
-        _ => false,
-    }
+fn range_parameters_match(parameters: &[(String, String)], target: &[(&str, &str)]) -> bool {
+    parameters.iter().all(|(name, value)| {
+        target.iter().any(|(target_name, target_value)| {
+            name == target_name
+                && if name == "charset" {
+                    value.eq_ignore_ascii_case(target_value)
+                } else {
+                    value == target_value
+                }
+        })
+    })
+}
+
+#[must_use]
+pub(crate) fn accepts_document(
+    headers: &HeaderMap,
+    media_type: &str,
+    parameters: &[(&str, &str)],
+) -> bool {
+    accept_ranges(headers).is_none_or(|ranges| {
+        effective_quality(&ranges, media_type, parameters).is_some_and(|quality| quality > 0.0)
+    })
 }
 
 fn range_specificity(range: &str, target: &str) -> Option<u8> {
@@ -189,7 +207,6 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
     }
 
     let mut quality = 1.0;
-    let mut quality_seen = false;
     let mut names = BTreeSet::new();
     let mut media_parameters = Vec::new();
     for part in parts.iter().skip(1) {
@@ -200,16 +217,10 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
             return None;
         }
         if name == "q" {
-            if quality_seen {
-                return None;
-            }
             quality = parse_quality(raw_value.trim())?;
-            quality_seen = true;
         } else {
             let value = decode_parameter(raw_value.trim())?;
-            if !quality_seen {
-                media_parameters.push((name, value));
-            }
+            media_parameters.push((name, value));
         }
     }
 
@@ -396,6 +407,12 @@ mod tests {
             negotiate_problem_representation(&headers("application/problem+json;charset=utf-8")),
             Representation::JsonUtf8
         );
+        assert_eq!(
+            negotiate_problem_representation(&headers(
+                "application/problem+json;q=1;charset=UTF-8"
+            )),
+            Representation::JsonUtf8
+        );
     }
 
     #[test]
@@ -405,7 +422,7 @@ mod tests {
             .map(|value| parse_range(value).expect("range"))
             .collect::<Vec<_>>();
         assert_eq!(
-            effective_quality(&ranges, "application/json", false),
+            effective_quality(&ranges, "application/json", &[]),
             Some(0.7)
         );
 
@@ -419,11 +436,11 @@ mod tests {
         .map(|value| parse_range(value).expect("range"))
         .collect::<Vec<_>>();
         assert_eq!(
-            effective_quality(&ranges, "application/json", true),
+            effective_quality(&ranges, "application/json", &[("charset", "utf-8")]),
             Some(0.6)
         );
         assert_eq!(
-            effective_quality(&ranges, "application/json", false),
+            effective_quality(&ranges, "application/json", &[]),
             Some(0.9)
         );
 
@@ -432,7 +449,7 @@ mod tests {
             .map(|value| parse_range(value).expect("range"))
             .collect::<Vec<_>>();
         assert_eq!(
-            effective_quality(&ranges, "application/json", true),
+            effective_quality(&ranges, "application/json", &[("charset", "utf-8")]),
             Some(0.8)
         );
     }
@@ -453,12 +470,15 @@ mod tests {
         ] {
             assert!(parse_range(value).is_none(), "{value}");
         }
-        let range = parse_range("Application/JSON; Charset=\"utf\\-8\"; q=0.125; ignored=late")
+        let range = parse_range("Application/JSON; Charset=\"utf\\-8\"; q=0.125; profile=example")
             .expect("valid range");
         assert_eq!(range.media_type, "application/json");
         assert_eq!(
             range.media_parameters,
-            [("charset".to_owned(), "utf-8".to_owned())]
+            [
+                ("charset".to_owned(), "utf-8".to_owned()),
+                ("profile".to_owned(), "example".to_owned()),
+            ]
         );
         assert_eq!(range.quality, 0.125);
     }

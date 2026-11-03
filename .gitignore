@@ -25,3 +25,7 @@ coverage.html
 
 # Documentation and planning
 plans/
+
+# Local Firebase emulator state and logs
+.firebase/
+*-debug.log
