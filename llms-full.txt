@@ -202,7 +202,7 @@ Cursors bind the operation, resource, original limit, and item filter. Changing
 those requires a new first-page request. Terminal pages omit unavailable links.
 
 GitHub repository, activity, and tag lists accept only `limit` (default 20,
-range 1-100) and `cursor`. Their objects contain `repos`, `activity`, or `tags`,
+range 1-100) and `cursor`. Their objects contain `repos`, `activities`, or `tags`,
 respectively. Languages return `languages` without pagination. Upstream views
 can change between pages; a cursor does not promise a snapshot. GitHub IDs and
 counts are JSON integers, timestamps are UTC with millisecond precision, and
