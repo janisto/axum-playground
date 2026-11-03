@@ -13,6 +13,12 @@ human users and contributors. Do not duplicate agent instructions into it.
   Simplify unnecessary behavior instead of adding machinery to defend it.
 - State the failure mode before architectural, security, persistence, or
   production-impacting changes.
+- Evaluate dependency updates and ongoing ownership before choosing a workaround.
+  Do not add dependency source patches, vendored forks, or runtime monkey-patches.
+  Keep ordinary installs and Dependabot updates working without patch cleanup.
+  Prefer supported native behavior and document non-blocking upstream limitations.
+  If a fix changes agreed guarantees or its maintenance cost is uncertain, present
+  the evidence and ask the user before implementation.
 - Report implementation, validation, and remaining risks before completion.
 - Keep instructions, comments, and documentation concise. Explain and obtain
   explicit approval before removing, merging, or relocating guidance, including
@@ -108,6 +114,10 @@ Keep skill frontmatter, directory names, UI metadata, paths, commands, and repos
 This example is not deployed; GCP is a possible future target. Keep manual
 deployment examples project-agnostic and do not deploy on pushes, PRs, or merges.
 
+- Do not introduce or enable extra workflows, CI jobs, automated maintenance tasks,
+  or recurring triggers without explicit maintainer permission. Modernization and
+  alignment do not grant that permission. Keep ordinary validation on push/PR
+  events and Dependabot version checks quarterly to limit alerts and maintenance.
 - Keep required `ci` and independent pure `lint` checks. Preserve early lint
   feedback and fail CI when a mandatory validation result is not successful.
 - Before workflow changes, use Chrome to inspect GitHub Settings > Rules >
@@ -136,6 +146,10 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
 - Keep `Cargo.lock` checked in and never edit it manually. Use `cargo update` or `just lock` only for intentional dependency-resolution changes. If unrelated lockfile churn appears, stop instead of hand-editing it away.
 - Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Keep Cargo CLI tool installs aligned between the `Justfile` and workflows; use each tool release's packaged lockfile without hard-coding tool versions that Dependabot cannot maintain.
+- For an adopted protocol, verify the latest upstream specification independently
+  of its SDK version. Before 1.0, target the latest implementable upstream draft;
+  inspect the selected library's actual support and report concrete blockers.
+  Finding a newer protocol or draft does not authorize adopting a new capability.
 - Avoid new dependencies when the standard library or an existing crate fits. Prefer actively maintained, well-documented crates and justify additions against a concrete feature need.
 
 ## Application architecture

@@ -12,7 +12,7 @@ Read `AGENTS.md`, then verify every affected `README.md` claim against the curre
 - runtime and versions: `Cargo.toml`, `Cargo.lock`, and `rust-toolchain.toml`;
 - application and routes: `src/main.rs`, `src/app.rs`, `src/http/health.rs`, and `src/http/v1/`;
 - API behavior: `src/http/codec.rs`, `src/problem/`, `src/pagination/`, `src/auth/`, `src/services/`, and integration tests;
-- configuration and Firebase: `src/config.rs`, `.env.example`, and emulator tests;
+- configuration and Firebase: `src/config.rs`, `.env.example`, `firebase.json`, and emulator tests;
 - commands and containers: `Justfile`, `Dockerfile`, and `cloudbuild.yaml`;
 - automation and supported versions: `.github/workflows/`, `.github/dependabot.yml`, and pinned action or image references.
 

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.19.0
+# syntax=docker/dockerfile:1.28.0
 # Dockerfile for the Rust Axum application.
 #
 # Intended deployment path:
@@ -9,7 +9,7 @@
 # centered around Google buildpack base images, which is not the default path for
 # this Rust service.
 
-ARG RUST_IMAGE=rust:1.97.1-bookworm
+ARG RUST_IMAGE=rust:1.99.1-trixie
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian13:nonroot
 ARG VERSION=dev
 
@@ -25,7 +25,7 @@ RUN apt-get update \
 
 COPY . .
 
-# The crate scaffold will provide Cargo.toml, Cargo.lock, and src/.
+# Build the committed application and locked dependency graph.
 RUN cargo build --release --locked --bin axum-playground
 
 FROM ${RUNTIME_IMAGE} AS runtime

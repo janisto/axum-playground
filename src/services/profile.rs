@@ -15,7 +15,6 @@ use firestore::{
     FirestoreDb, FirestoreDbOptions, FirestoreDocument, FirestoreWritePrecondition,
     errors::{BackoffError, FirestoreError},
 };
-use gcloud_sdk::{ExternalJwtFunctionSource, Token, TokenSourceType};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, macros::datetime};
 use tokio::sync::OnceCell;
@@ -44,8 +43,6 @@ pub(crate) const CANONICAL_PROFILE_FIELDS: [&str; 9] = [
     "updatedAt",
 ];
 const FIRESTORE_API_URL: &str = "https://firestore.googleapis.com";
-const EMULATOR_BEARER_TOKEN: &str = "owner";
-const EMULATOR_TOKEN_EXPIRY: &str = "9999-12-31T23:59:59Z";
 const PROFILE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
@@ -704,26 +701,7 @@ pub(crate) async fn new_firestore_db(
     emulator_host: Option<&str>,
 ) -> Result<FirestoreDb, ProfileServiceError> {
     let options = firestore_db_options(project_id, emulator_host);
-    let db = if emulator_host.is_some() {
-        let token_source = ExternalJwtFunctionSource::new(|| async {
-            let expiry = EMULATOR_TOKEN_EXPIRY
-                .parse()
-                .expect("static emulator token expiry should be valid");
-            Ok(Token::new(
-                "Bearer".to_owned(),
-                EMULATOR_BEARER_TOKEN.into(),
-                expiry,
-            ))
-        });
-        FirestoreDb::with_options_token_source(
-            options,
-            Vec::new(),
-            TokenSourceType::ExternalSource(Box::new(token_source)),
-        )
-        .await
-    } else {
-        FirestoreDb::with_options(options).await
-    };
+    let db = FirestoreDb::with_options(options).await;
     db.map_err(|error| map_firestore_error(error, ProfileOperation::Initialize))
 }
 

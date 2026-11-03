@@ -1,12 +1,12 @@
-name: App build, tests and coverage
+name: App validation
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,10 +16,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  quality:
+    name: Rust quality and dependency safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-quality
+
+      - name: Install existing quality tools
+        run: |
+          cargo install --locked cargo-sort
+          cargo install --locked cargo-machete
+          cargo install --locked cargo-deny
+          cargo install --locked cargo-audit
+
+      - name: Check formatting and manifest ordering
+        run: |
+          cargo fmt --all -- --check
+          cargo sort --check --grouped
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check documentation
+        run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D rustdoc::all
+
+      - name: Check unused dependencies
+        run: cargo machete
+
+      - name: Check dependency policy and advisories
+        run: |
+          cargo deny check
+          cargo audit
+
   tests:
     name: tests
-    permissions:
-      contents: read
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -29,7 +78,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal --component llvm-tools-preview
 
       - name: Cache cargo artifacts
         uses: actions/cache@v6.1.0
@@ -38,144 +87,31 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-tests
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-tests
 
-      - name: Install test tools
-        run: cargo install --locked cargo-nextest
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Run tests
-        run: cargo nextest run --locked
-
-      - name: Run doctests
-        run: cargo test --locked --doc
-
-  firebase_emulators:
-    name: firebase-emulators
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal
-
-      - name: Set up Java
-        uses: actions/setup-java@v5.6.0
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7.0.0
-        with:
-          node-version: '24'
-
-      - name: Set up Just
-        uses: extractions/setup-just@v4.0.0
-
-      - name: Cache cargo artifacts
-        uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-firebase-emulators
-
-      - name: Cache Firebase emulators
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.cache/firebase/emulators
-          key: firebase-emulators-${{ runner.os }}-firebase-tools-15.24.0
-
-      # The emulator CLI is a pinned CI tool; this repository has no Node dependency graph to lock.
-      - name: Install Firebase CLI
-        run: npm install --global firebase-tools@15.24.0 # zizmor: ignore[adhoc-packages]
-
-      - name: Run required Firestore emulator tests
-        run: just test-emulators-ci
-
-  container:
-    name: container
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Build production container
-        run: docker build --tag axum-playground:ci .
-
-  ci:
-    name: ci
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: always()
-    needs:
-      - tests
-      - firebase_emulators
-      - container
-    steps:
-      - name: Require successful test jobs
-        env:
-          FIREBASE_EMULATORS_RESULT: ${{ needs.firebase_emulators.result }}
-          CONTAINER_RESULT: ${{ needs.container.result }}
-          TESTS_RESULT: ${{ needs.tests.result }}
-        run: |
-          [[ "$TESTS_RESULT" == "success" ]]
-          [[ "$FIREBASE_EMULATORS_RESULT" == "success" ]]
-          [[ "$CONTAINER_RESULT" == "success" ]]
-
-  coverage:
-    name: coverage
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: ci
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
-
-      - name: Cache cargo artifacts
-        uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-coverage
-
-      - name: Install coverage tools
+      - name: Install existing test and coverage tools
         run: |
           cargo install --locked cargo-nextest
           cargo install --locked cargo-llvm-cov
 
-      - name: Generate lcov report
-        run: cargo llvm-cov nextest --locked --lcov --output-path coverage.lcov
+      - name: Build
+        run: cargo build --locked
 
-      - name: Generate HTML coverage report
-        run: cargo llvm-cov nextest --locked --html
+      - name: Test with coverage
+        run: cargo llvm-cov nextest --locked --no-report
 
-      - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v7.0.1
+      - name: Generate available coverage reports
+        if: ${{ !cancelled() && hashFiles('target/llvm-cov-target/**/*.profraw') != '' }}
+        run: |
+          cargo llvm-cov report --lcov --output-path coverage.lcov
+          cargo llvm-cov report --html
+
+      - name: Run doctests
+        run: cargo test --locked --doc
+
+      - name: Upload available coverage artifacts
+        if: ${{ !cancelled() && (hashFiles('coverage.lcov') != '' || hashFiles('target/llvm-cov/html/index.html') != '') }}
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: coverage-report
           path: |
@@ -183,3 +119,120 @@ jobs:
             target/llvm-cov/html
           if-no-files-found: error
           retention-days: 7
+
+  firebase_emulators:
+    name: firebase-emulators
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOOGLE_APPLICATION_CREDENTIALS: /dev/null
+      GCE_METADATA_HOST: '127.0.0.1:9'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        run: rustup toolchain install 1.99.1 --profile minimal
+
+      - name: Set up Java
+        uses: actions/setup-java@v6.1.0
+        with:
+          distribution: temurin
+          java-version: '27'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24.22.2'
+          package-manager-cache: false
+
+      - name: Set up Just
+        uses: extractions/setup-just@v4.0.0
+        with:
+          just-version: '1.59.0'
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-firebase-emulators
+
+      - name: Cache Firebase emulators
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ runner.os }}-firebase-tools-15.34.2
+
+      - name: Run required Firestore emulator tests
+        run: just test-emulators-ci
+
+  container:
+    name: container
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Just
+        uses: extractions/setup-just@v4.0.0
+        with:
+          just-version: '1.59.0'
+
+      - name: Build and smoke-test production container
+        run: just container-smoke
+
+  workflow-security:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+      - name: Run zizmor
+        if: ${{ !cancelled() }}
+        uses: zizmorcore/zizmor-action@v0.8.1
+        env:
+          ZIZMOR_OFFLINE: 'true'
+        with:
+          version: '1.32.0'
+          persona: pedantic
+          online-audits: false
+          advanced-security: false
+
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    if: ${{ always() }}
+    needs: [quality, tests, firebase_emulators, container, workflow-security]
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          FIREBASE_EMULATORS_RESULT: ${{ needs.firebase_emulators.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
+          WORKFLOW_SECURITY_RESULT: ${{ needs.workflow-security.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$TESTS_RESULT" = success
+          test "$FIREBASE_EMULATORS_RESULT" = success
+          test "$CONTAINER_RESULT" = success
+          test "$WORKFLOW_SECURITY_RESULT" = success

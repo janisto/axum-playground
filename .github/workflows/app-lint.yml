@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -20,7 +19,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -28,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
 
       - name: Cache cargo artifacts
         uses: actions/cache@v6.1.0
@@ -37,34 +36,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-lint
+          key: rust-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-lint
 
-      - name: Install QA tools
-        run: |
-          cargo install --locked cargo-sort
-          cargo install --locked cargo-machete
-          cargo install --locked cargo-deny
-          cargo install --locked cargo-audit
-
-      - name: Format check
+      - name: Check formatting
         run: cargo fmt --all -- --check
-
-      - name: Manifest ordering
-        run: cargo sort --check --grouped
 
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Documentation
-        run: cargo doc --locked --all-features --no-deps
-        env:
-          RUSTDOCFLAGS: -D rustdoc::all
-
-      - name: Unused dependencies
-        run: cargo machete
-
-      - name: Dependency policy
-        run: cargo deny check
-
-      - name: Security audit
-        run: cargo audit

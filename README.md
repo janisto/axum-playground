@@ -2,7 +2,7 @@
 
 [![Build and tests](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-ci.yml?branch=main&label=build%20%26%20tests&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-ci.yml)
 [![Code quality](https://img.shields.io/github/actions/workflow/status/janisto/axum-playground/app-lint.yml?branch=main&label=code%20quality&logo=github)](https://github.com/janisto/axum-playground/actions/workflows/app-lint.yml)
-[![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![Rust 1.99.1](https://img.shields.io/badge/Rust-1.99.1-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![MIT license](https://img.shields.io/github/license/janisto/axum-playground)](LICENSE)
 
 A public REST API example built with [Axum](https://github.com/tokio-rs/axum) and Tokio, demonstrating Firebase Authentication, Firestore CRUD operations, GitHub proxy endpoints, and a modern Rust development workflow using [Just](https://github.com/casey/just). It is intentionally not deployed yet; the repository is the example and validation target.
@@ -105,9 +105,9 @@ cp .env.example .env
 | `PORT` | Server listen port | `8080` |
 | `FIREBASE_PROJECT_ID` | Firebase project ID and fallback Google project anchor | `demo-test-project` |
 | `APP_ENVIRONMENT` | Runtime environment: `development`, `test`, or `production` | `development` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Local ADC override path; leave unset on Cloud Run | - |
-| `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | - |
-| `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | - |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Optional ADC override for future production access; local emulators do not use it | - |
+| `FIREBASE_AUTH_EMULATOR_HOST` | Firebase Auth emulator host without scheme | `127.0.0.1:7110` in `.env.example` |
+| `FIRESTORE_EMULATOR_HOST` | Firestore emulator host without scheme | `127.0.0.1:7130` in `.env.example` |
 | `GOOGLE_CLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
 | `GCP_PROJECT` | Optional Google project fallback for Firestore | - |
 | `GCLOUD_PROJECT` | Optional Google project fallback for Firestore | - |
@@ -115,7 +115,9 @@ cp .env.example .env
 
 Notes:
 
-- Emulator hosts must omit the protocol prefix and use loopback, for example `127.0.0.1:9099` and `127.0.0.1:8080`. Emulator configuration is rejected outside `development` and `test`.
+- Emulator hosts must omit the protocol prefix and use loopback. `.env.example`
+  and `firebase.json` use Auth at `127.0.0.1:7110` and Firestore at
+  `127.0.0.1:7130`. Emulator configuration is rejected outside `development` and `test`.
 - Unknown `APP_ENVIRONMENT` values fail startup instead of silently selecting development behavior.
 - When `K_SERVICE` indicates Cloud Run, startup requires `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
@@ -129,16 +131,19 @@ Notes:
 
 ### Requirements
 
-- Rust 1.97.1 via `rust-toolchain.toml`
-- [Just](https://github.com/casey/just) 1.57.0
-- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.28.0 for local workflow checks
-- [Firebase CLI](https://firebase.google.com/docs/cli) and Java 21 when running emulator-backed tests
-- Podman or Docker for local image builds
+- Rust 1.99.1 via `rust-toolchain.toml`
+- [Just](https://github.com/casey/just) 1.59.0
+- [actionlint](https://github.com/rhysd/actionlint) 1.7.12 and [zizmor](https://github.com/zizmorcore/zizmor) 1.32.0 for local workflow checks
+- Node.js 24.22.2 and Java 27 for the pinned Firebase CLI 15.34.2
+  emulator commands; this auxiliary CLI uses Node 24 because its `superstatic`
+  dependency does not support Node 26 yet. The application runs on Rust only.
+- Podman or Docker for local image builds, plus `curl` and `jq` for container smoke checks
 
-Install the workflow linters through Homebrew, as in `axum-observability`:
+Install actionlint through Homebrew and the current zizmor with Cargo:
 
 ```bash
-brew install actionlint zizmor
+brew install actionlint
+cargo install --locked zizmor
 ```
 
 The actionlint formula installs ShellCheck, which actionlint uses for embedded
@@ -147,8 +152,9 @@ do not contain embedded Python scripts.
 
 Run `just install` to fetch the locked dependency graph and install the current
 Cargo maintenance and QA tools: cargo-edit, cargo-nextest, cargo-llvm-cov,
-cargo-deny, cargo-audit, cargo-mutants, cargo-sort, and cargo-machete. Cargo
+cargo-deny, cargo-audit, cargo-mutants, cargo-sort, cargo-machete, and zizmor. Cargo
 selects each tool's latest release and uses that release's packaged lockfile.
+Ensure Cargo's binary directory precedes older copies of these tools in `PATH`.
 
 `just update` is intentionally comprehensive for this application. It upgrades
 all direct dependency requirements to their latest releases, including
@@ -158,13 +164,19 @@ manifest and source changes, then run `just qa` before committing them.
 
 ### Quick Start
 
-Choose either Application Default Credentials or the local Firebase emulators before starting. For local exploration of the public unauthenticated routes, the Auth emulator configuration keeps startup local:
+The example environment selects the local Firebase emulators. Google credentials
+and a GCP account are not needed. After copying `.env.example`, start the server:
 
 ```bash
-FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 just run
+just run
 ```
 
-Setting `FIREBASE_AUTH_EMULATOR_HOST` selects the loopback-only emulator verifier; the server validates those tokens locally and does not connect to the Auth emulator. Run the Auth emulator when you need it to issue test tokens. To exercise profile persistence, start the Firestore emulator as described below.
+Public routes work without the emulators running. For profile requests, start
+`just emulators` in another terminal; it runs Auth on `127.0.0.1:7110` and
+Firestore on `127.0.0.1:7130` with demo project `demo-test-project`.
+The Auth emulator issues local test tokens. Firestore's native emulator mode
+uses its stub credentials without reading ADC. Never enable emulator settings
+in production.
 
 Then visit:
 
@@ -252,10 +264,11 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just doc` | Build documentation with all rustdoc lints denied |
 | `just sort-check` | Verify grouped manifest ordering |
 | `just unused-dependencies` | Detect unused direct dependencies |
-| `just workflow-check` | Validate workflows with actionlint and zizmor |
+| `just workflow-check` | Validate workflows with actionlint and offline pedantic zizmor |
 | `just qa` | Run the non-mutating local quality gate |
 | `just test` | Run the main test suite with `cargo nextest` |
 | `just test-doc` | Run doctests |
+| `just emulators` | Start local Auth and Firestore emulators with the pinned CLI |
 | `just test-emulators` | Run the Firestore emulator test when configured |
 | `just test-emulators-ci` | Start the Firestore emulator, run its required integration test, and stop it |
 | `just mutations` | Run the explicit mutation-testing campaign |
@@ -266,6 +279,7 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | `just deny` | Run dependency policy checks |
 | `just audit` | Run dependency vulnerability checks |
 | `just docker-build` | Build the development image with Podman first, then Docker |
+| `just container-smoke` | Build and check the non-root read-only image over HTTP, then verify graceful shutdown |
 | `just lock` | Regenerate `Cargo.lock` |
 
 Run `just --list` to see all available recipes.
@@ -309,7 +323,7 @@ just test-emulators-ci
 To reuse an emulator that is already running, export its host instead:
 
 ```bash
-export FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+export FIRESTORE_EMULATOR_HOST=127.0.0.1:7130
 just test-emulators
 ```
 
@@ -422,7 +436,7 @@ Production runtime expectations:
 - Axum-aligned Clippy policy, canonical Rust formatting, strict rustdoc, manifest ordering, and unused-dependency checks
 - Local GitHub Actions workflow validation through the documented actionlint and zizmor versions
 - Coverage export through `just coverage-lcov` and `just coverage-html`
-- Container image buildability through `just docker-build` and the hosted `app-ci.yml` container job
+- Real non-root, read-only container startup, public HTTP probes, generated schema, and graceful shutdown through `just container-smoke`
 
 ### CI/CD
 
@@ -430,14 +444,15 @@ GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Description |
 | --- | --- |
-| `app-ci.yml` | Build, tests, doctests, required Firestore emulator coverage, production container build, and coverage artifact generation |
-| `app-lint.yml` | Formatting, manifest ordering, clippy, rustdoc, unused dependencies, dependency policy, and security audit |
-| `workflow-security.yml` | Hosted zizmor workflow security analysis |
+| `app-ci.yml` | Quality checks gate builds, tests with coverage, Firestore emulator tests, and containers; independent actionlint and read-only pedantic zizmor feed the fail-closed `ci` aggregate |
+| `app-lint.yml` | Independent pure formatting and Clippy checks with minimal tool setup |
 | `labeler.yml` | Automatic pull request labeling |
 | `labeler-manual.yml` | Manual backfill labeling for historical pull requests |
 | `dependabot-auto-merge.yml` | Auto-merge Dependabot minor and patch updates |
 
-Dependabot configuration lives in `.github/dependabot.yml`, and label rules live in `.github/labeler.yml`.
+Dependabot version checks remain quarterly. Configuration lives in
+`.github/dependabot.yml`, and label rules live in `.github/labeler.yml`.
+Validation runs on PRs and main pushes, without scheduled validation.
 
 ## License
 

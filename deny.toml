@@ -3,8 +3,8 @@ all-features = true
 
 [advisories]
 ignore = [
-    # Transitive through firestore 0.49.0 with no safe replacement available yet.
-    # Recheck by 2026-10-16 or when upgrading firestore.
+    # Firestore 0.61.1 still requires backoff 0.4.0, which depends on instant 0.1.13.
+    # Both advisories mark unmaintained crates; no compatible upstream replacement exists.
     "RUSTSEC-2024-0384",
     "RUSTSEC-2025-0012",
 ]

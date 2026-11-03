@@ -15,6 +15,40 @@ build:
 docker-build:
     {{ CONTAINER_RUNTIME }} build -t axum-playground:dev .
 
+[group('build')]
+container-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    image=localhost/axum-playground:ci
+    container=axum-playground-smoke
+    cleanup() {
+        smoke_status=$?
+        if [[ "$smoke_status" != 0 ]]; then
+            {{ CONTAINER_RUNTIME }} logs "$container" 2>/dev/null || true
+        fi
+        {{ CONTAINER_RUNTIME }} rm --force "$container" >/dev/null 2>&1 || true
+        exit "$smoke_status"
+    }
+    trap cleanup EXIT
+    {{ CONTAINER_RUNTIME }} build --tag "$image" .
+    {{ CONTAINER_RUNTIME }} inspect "$image" | jq --exit-status '.[0].Config.User == "65532:65532"'
+    {{ CONTAINER_RUNTIME }} run --detach --pull=never --read-only --name "$container" \
+        --publish 127.0.0.1:18087:8080 \
+        --env APP_ENVIRONMENT=test \
+        --env FIREBASE_PROJECT_ID=demo-test-project \
+        --env FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:7110 \
+        --env FIRESTORE_EMULATOR_HOST=127.0.0.1:7130 \
+        --env GOOGLE_APPLICATION_CREDENTIALS=/no-google-credentials.json \
+        "$image"
+    curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 \
+        --max-time 2 http://127.0.0.1:18087/health | jq --exit-status '.status == "healthy"'
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/v1/hello \
+        | jq --exit-status '.message == "Hello, World!"'
+    curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18087/openapi.json \
+        | jq --exit-status '.openapi == "3.1.0" and (.paths["/v1/profile"].get.security == [{"bearerAuth":[]}])'
+    {{ CONTAINER_RUNTIME }} stop --time 10 "$container"
+    {{ CONTAINER_RUNTIME }} inspect "$container" | jq --exit-status '.[0].State.ExitCode == 0'
+
 [group('run')]
 run:
     cargo run --locked --bin axum-playground
@@ -32,6 +66,7 @@ install-tools:
     cargo install --locked cargo-mutants
     cargo install --locked cargo-sort
     cargo install --locked cargo-machete
+    cargo install --locked zizmor
 
 [group('lifecycle')]
 download:
@@ -70,7 +105,7 @@ unused-dependencies:
 [group('qa')]
 workflow-check:
     actionlint
-    zizmor --offline .
+    zizmor --offline --persona pedantic .
 
 [group('test')]
 test:
@@ -80,13 +115,17 @@ test:
 test-doc:
     cargo test --doc --locked
 
+[group('run')]
+emulators:
+    npx --yes firebase-tools@15.34.2 emulators:start --only auth,firestore --project demo-test-project
+
 [group('test')]
 test-emulators:
     if [[ -z "${FIRESTORE_EMULATOR_HOST:-}" ]]; then echo "Skipping Firestore emulator tests because FIRESTORE_EMULATOR_HOST is unset."; else cargo test --locked --test firestore_emulator -- --ignored; fi
 
 [group('test')]
 test-emulators-ci:
-    firebase emulators:exec --only firestore --project demo-test-project \
+    npx --yes firebase-tools@15.34.2 emulators:exec --only firestore --project demo-test-project \
         "cargo test --locked --test firestore_emulator -- --ignored"
 
 [group('adversarial')]

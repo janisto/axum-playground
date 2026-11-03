@@ -166,11 +166,7 @@ async fn served_document_has_exact_inventory_security_statuses_and_media() {
             .as_str()
             .is_some_and(|value| !value.is_empty())
     );
-    assert!(
-        document["info"]["version"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
+    assert_eq!(document["info"]["version"], env!("CARGO_PKG_VERSION"));
 
     let actual_paths = document["paths"]
         .as_object()
