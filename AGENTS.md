@@ -145,7 +145,11 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Use the root `Justfile` for normal workflows. `just fmt` applies formatting, `just qa` is the non-mutating repository gate, `just check` adds optional emulator coverage, and `just ci` adds a container build.
 - Use a focused `cargo test --locked --test <target>` only when narrowing a test failure and the dependency graph must remain unchanged.
 - Keep `Cargo.lock` checked in and never edit it manually. Use `cargo update` or `just lock` only for intentional dependency-resolution changes. If unrelated lockfile churn appears, stop instead of hand-editing it away.
-- Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Keep Cargo CLI tool installs aligned between the `Justfile` and workflows; use each tool release's packaged lockfile without hard-coding tool versions that Dependabot cannot maintain.
+- Keep compatible Cargo requirements in `Cargo.toml`, exact application resolution
+  in `Cargo.lock`, and Dependabot in `lockfile-only` mode. Pin Cargo CLI tools to
+  reviewed full versions in the `Justfile` and workflows, install with `--locked`,
+  and update matching pins together during deliberate tool upgrades. Dependabot
+  maintains the application graph, not these standalone tool selections.
 - For an adopted protocol, verify the latest upstream specification independently
   of its SDK version. Before 1.0, target the latest implementable upstream draft;
   inspect the selected library's actual support and report concrete blockers.
@@ -190,7 +194,7 @@ deployment examples project-agnostic and do not deploy on pushes, PRs, or merges
 - Preserve production Firebase verification: RS256 Google keys, issuer and audience checks, Identity Platform lookup, and disabled or revoked-user handling. This application is not tenant-aware, so reject tokens carrying `firebase.tenant` rather than looking the UID up in the root project. Missing or malformed revocation metadata is an authentication dependency failure, never evidence that a token is valid. Preserve the explicit emulator path when `FIREBASE_AUTH_EMULATOR_HOST` is configured.
 - Use mock services for deterministic tests and the Firestore-backed profile service only when persistence semantics are under test. Preserve create-if-absent, ownership, audit, and timestamp behavior in the service layer. Derive Firestore profile document IDs with the shared prefixed Base64URL helper; Firebase UIDs are opaque and may contain Firestore path delimiters.
 - Keep runtime configuration in environment variables and `AppConfig`. Never commit or log credentials, tokens, service-account paths, authorization values, profile data, or other PII. Prefer Application Default Credentials and workload identity in deployed environments.
-- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Firebase emulator hosts are local-only, loopback-only, and must remain rejected in production environments. When `K_SERVICE` identifies Cloud Run, require `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
+- Runtime state construction must always use real services. Tests compose doubles through `AppState::with_services(...)`; environment labels must not activate mocks. Emulator mode requires paired loopback Auth and Firestore hosts in development/test and one matching `demo-*` project for Firebase and the effective Firestore project. Reject partial pairs, live or mismatched project overrides, and production emulator use before constructing clients. When `K_SERVICE` identifies Cloud Run, require `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - Keep request logs and trace correlation in `axum-observability`. Add domain logs only when they provide information beyond the access record, and keep diagnostic fields non-sensitive.
 - Treat upstream transport errors and payloads as untrusted. Preserve useful internal error chains while returning controlled public details.
 

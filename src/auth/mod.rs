@@ -213,15 +213,10 @@ struct IdentityLookupUser {
 
 impl AuthVerifier {
     pub fn from_config(config: &AppConfig) -> Result<Self, StartupError> {
+        config.validate_emulators()?;
         let project_id = config.firebase_project_id.clone();
 
-        if let Some(host) = config.firebase_auth_emulator_host.as_deref() {
-            if !config.emulator_host_is_loopback(host) {
-                return Err(StartupError::UnsafeEmulatorHost {
-                    variable: "FIREBASE_AUTH_EMULATOR_HOST",
-                    host: host.to_owned(),
-                });
-            }
+        if config.firebase_auth_emulator_host.is_some() {
             return Ok(Self {
                 inner: Arc::new(AuthVerifierInner::Emulator(Box::new(
                     EmulatorAuthVerifier { project_id },
@@ -975,6 +970,7 @@ mod tests {
         ));
 
         config.app_environment = crate::config::AppEnvironment::Development;
+        config.firestore_emulator_host = Some("127.0.0.1:7130".to_owned());
         assert!(AuthVerifier::from_config(&config).is_ok());
     }
 

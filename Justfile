@@ -58,15 +58,15 @@ install: download install-tools
 
 [group('lifecycle')]
 install-tools:
-    cargo install --locked cargo-edit
-    cargo install --locked cargo-nextest
-    cargo install --locked cargo-llvm-cov
-    cargo install --locked cargo-deny
-    cargo install --locked cargo-audit
-    cargo install --locked cargo-mutants
-    cargo install --locked cargo-sort
-    cargo install --locked cargo-machete
-    cargo install --locked zizmor
+    cargo install --locked cargo-edit --version 0.13.14
+    cargo install --locked cargo-nextest --version 0.9.151
+    cargo install --locked cargo-llvm-cov --version 0.9.1
+    cargo install --locked cargo-deny --version 0.20.2
+    cargo install --locked cargo-audit --version 0.22.2
+    cargo install --locked cargo-mutants --version 27.1.0
+    cargo install --locked cargo-sort --version 2.1.4
+    cargo install --locked cargo-machete --version 0.9.2
+    cargo install --locked zizmor --version 1.32.0
 
 [group('lifecycle')]
 download:

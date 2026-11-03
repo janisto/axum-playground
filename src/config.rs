@@ -112,7 +112,7 @@ impl AppConfig {
             return Err(StartupError::MissingCloudRunVariable("FIREBASE_PROJECT_ID"));
         }
 
-        Ok(Self {
+        let config = Self {
             port,
             firebase_project_id: firebase_project_id
                 .unwrap_or_else(|| "demo-test-project".to_owned()),
@@ -124,7 +124,9 @@ impl AppConfig {
             gcp_project: non_blank(value_for("GCP_PROJECT")),
             gcloud_project: non_blank(value_for("GCLOUD_PROJECT")),
             project_id: non_blank(value_for("PROJECT_ID")),
-        })
+        };
+        config.validate_emulators()?;
+        Ok(config)
     }
 
     #[must_use]
@@ -135,6 +137,35 @@ impl AppConfig {
             .or(self.gcloud_project.as_deref())
             .or(self.project_id.as_deref())
             .unwrap_or(self.firebase_project_id.as_str())
+    }
+
+    pub(crate) fn validate_emulators(&self) -> Result<(), StartupError> {
+        let auth = self.firebase_auth_emulator_host.as_deref();
+        let firestore = self.firestore_emulator_host.as_deref();
+        if auth.is_none() && firestore.is_none() {
+            return Ok(());
+        }
+        for (variable, host) in [
+            ("FIREBASE_AUTH_EMULATOR_HOST", auth),
+            ("FIRESTORE_EMULATOR_HOST", firestore),
+        ] {
+            if let Some(host) = host
+                && !self.emulator_host_is_loopback(host)
+            {
+                return Err(StartupError::UnsafeEmulatorHost {
+                    variable,
+                    host: host.to_owned(),
+                });
+            }
+        }
+        if auth.is_none()
+            || firestore.is_none()
+            || !self.firebase_project_id.starts_with("demo-")
+            || self.resolved_google_project_id() != self.firebase_project_id
+        {
+            return Err(StartupError::InvalidEmulatorConfiguration);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -152,6 +183,7 @@ impl AppConfig {
             return false;
         };
         matches!(hostname, "localhost" | "127.0.0.1" | "[::1]")
+            && port.bytes().all(|byte| byte.is_ascii_digit())
             && port.parse::<u16>().is_ok_and(|port| port > 0)
     }
 }
@@ -183,14 +215,79 @@ mod tests {
     }
 
     #[test]
+    fn emulator_configuration_rejects_partial_pairs_and_live_project_selection() {
+        for (name, overrides) in [
+            ("missing Auth", vec![("FIREBASE_AUTH_EMULATOR_HOST", None)]),
+            ("missing Firestore", vec![("FIRESTORE_EMULATOR_HOST", None)]),
+            (
+                "blank Auth",
+                vec![("FIREBASE_AUTH_EMULATOR_HOST", Some(" "))],
+            ),
+            (
+                "real Firebase project",
+                vec![("FIREBASE_PROJECT_ID", Some("live-project"))],
+            ),
+            (
+                "Google project override",
+                vec![("GOOGLE_CLOUD_PROJECT", Some("live-project"))],
+            ),
+            (
+                "GCP project override",
+                vec![("GCP_PROJECT", Some("live-project"))],
+            ),
+            (
+                "gcloud project override",
+                vec![("GCLOUD_PROJECT", Some("live-project"))],
+            ),
+            (
+                "generic project override",
+                vec![("PROJECT_ID", Some("live-project"))],
+            ),
+            (
+                "different demo project",
+                vec![("GOOGLE_CLOUD_PROJECT", Some("demo-other"))],
+            ),
+            ("production", vec![("APP_ENVIRONMENT", Some("production"))]),
+            (
+                "remote Auth",
+                vec![("FIREBASE_AUTH_EMULATOR_HOST", Some("auth.example.com:7110"))],
+            ),
+            (
+                "remote Firestore",
+                vec![("FIRESTORE_EMULATOR_HOST", Some("store.example.com:7130"))],
+            ),
+            (
+                "signed port",
+                vec![("FIRESTORE_EMULATOR_HOST", Some("127.0.0.1:+7130"))],
+            ),
+        ] {
+            let mut values = HashMap::from([
+                ("APP_ENVIRONMENT", "development"),
+                ("FIREBASE_PROJECT_ID", "demo-test-project"),
+                ("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:7110"),
+                ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:7130"),
+            ]);
+            for (key, value) in overrides {
+                if let Some(value) = value {
+                    values.insert(key, value);
+                } else {
+                    values.remove(key);
+                }
+            }
+            assert!(
+                AppConfig::from_values(|key| values.get(key).map(ToString::to_string)).is_err(),
+                "unsafe emulator configuration was accepted: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn config_values_preserve_explicit_settings() {
         let values = HashMap::from([
             ("PORT", "9090"),
             ("FIREBASE_PROJECT_ID", "firebase-project"),
             ("APP_ENVIRONMENT", "production"),
             ("GOOGLE_APPLICATION_CREDENTIALS", "/credentials.json"),
-            ("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:9099"),
-            ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080"),
             ("GOOGLE_CLOUD_PROJECT", "google-cloud-project"),
             ("GCP_PROJECT", "gcp-project"),
             ("GCLOUD_PROJECT", "gcloud-project"),
@@ -207,14 +304,38 @@ mod tests {
                 firebase_project_id: "firebase-project".to_owned(),
                 app_environment: AppEnvironment::Production,
                 google_application_credentials: Some("/credentials.json".to_owned()),
-                firebase_auth_emulator_host: Some("127.0.0.1:9099".to_owned()),
-                firestore_emulator_host: Some("127.0.0.1:8080".to_owned()),
+                firebase_auth_emulator_host: None,
+                firestore_emulator_host: None,
                 google_cloud_project: Some("google-cloud-project".to_owned()),
                 gcp_project: Some("gcp-project".to_owned()),
                 gcloud_project: Some("gcloud-project".to_owned()),
                 project_id: Some("project-id".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn emulator_configuration_preserves_paired_hosts_and_the_effective_demo_project() {
+        for environment in ["development", "test"] {
+            for host in ["localhost:7110", "127.0.0.1:7110", "[::1]:7110"] {
+                let values = HashMap::from([
+                    ("APP_ENVIRONMENT", environment),
+                    ("FIREBASE_AUTH_EMULATOR_HOST", host),
+                    ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:7130"),
+                    ("GOOGLE_CLOUD_PROJECT", "demo-test-project"),
+                    ("GCP_PROJECT", "unused-live-project"),
+                ]);
+                let config = AppConfig::from_values(|key| values.get(key).map(ToString::to_string))
+                    .expect("paired local emulators should use the default demo project");
+                assert_eq!(config.firebase_auth_emulator_host.as_deref(), Some(host));
+                assert_eq!(
+                    config.firestore_emulator_host.as_deref(),
+                    Some("127.0.0.1:7130")
+                );
+                assert_eq!(config.firebase_project_id, "demo-test-project");
+                assert_eq!(config.resolved_google_project_id(), "demo-test-project");
+            }
+        }
     }
 
     #[test]

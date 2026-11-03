@@ -232,14 +232,7 @@ impl fmt::Display for ProfileOperation {
 
 impl ProfileService {
     pub fn firestore(config: &AppConfig) -> Result<Self, StartupError> {
-        if let Some(host) = config.firestore_emulator_host.as_deref()
-            && !config.emulator_host_is_loopback(host)
-        {
-            return Err(StartupError::UnsafeEmulatorHost {
-                variable: "FIRESTORE_EMULATOR_HOST",
-                host: host.to_owned(),
-            });
-        }
+        config.validate_emulators()?;
         Ok(Self {
             inner: Arc::new(ProfileServiceInner::Firestore(Box::new(
                 FirestoreProfileStore {

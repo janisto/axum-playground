@@ -50,3 +50,8 @@ just check
 ```
 
 Run `just test-emulators` when Firestore emulator behavior changes. Ordinary local runs may skip that test when `FIRESTORE_EMULATOR_HOST` is unset; report the skipped external validation explicitly.
+
+Runtime emulator fixtures need both loopback Auth and Firestore hosts in
+development/test and the same `demo-*` Firebase and effective Firestore project.
+Keep project-fallback overrides consistent; never combine emulator identities
+with a live persistence configuration.

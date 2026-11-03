@@ -117,7 +117,11 @@ Notes:
 
 - Emulator hosts must omit the protocol prefix and use loopback. `.env.example`
   and `firebase.json` use Auth at `127.0.0.1:7110` and Firestore at
-  `127.0.0.1:7130`. Emulator configuration is rejected outside `development` and `test`.
+  `127.0.0.1:7130`. Configure both hosts together in `development` or `test`.
+  Firebase and the effective Firestore project must be the same `demo-*` project;
+  leave project fallbacks unset or set the effective fallback to that same project.
+  Partial pairs, remote hosts, live or mismatched projects, and production emulator
+  configuration fail before client creation.
 - Unknown `APP_ENVIRONMENT` values fail startup instead of silently selecting development behavior.
 - When `K_SERVICE` indicates Cloud Run, startup requires `APP_ENVIRONMENT=production` and an explicit `FIREBASE_PROJECT_ID`.
 - On Cloud Run, use the attached service identity and leave `GOOGLE_APPLICATION_CREDENTIALS` unset.
@@ -143,17 +147,18 @@ Install actionlint through Homebrew and the current zizmor with Cargo:
 
 ```bash
 brew install actionlint
-cargo install --locked zizmor
+cargo install --locked zizmor --version 1.32.0
 ```
 
 The actionlint formula installs ShellCheck, which actionlint uses for embedded
 shell scripts. This repository does not require pyflakes because its workflows
 do not contain embedded Python scripts.
 
-Run `just install` to fetch the locked dependency graph and install the current
+Run `just install` to fetch the locked dependency graph and install the reviewed
 Cargo maintenance and QA tools: cargo-edit, cargo-nextest, cargo-llvm-cov,
-cargo-deny, cargo-audit, cargo-mutants, cargo-sort, cargo-machete, and zizmor. Cargo
-selects each tool's latest release and uses that release's packaged lockfile.
+cargo-deny, cargo-audit, cargo-mutants, cargo-sort, cargo-machete, and zizmor.
+The `Justfile` pins each tool's full version and Cargo uses its packaged lockfile.
+Tool upgrades update the local and CI pins together after release review and validation.
 Ensure Cargo's binary directory precedes older copies of these tools in `PATH`.
 
 `just update` is intentionally comprehensive for this application. It upgrades
@@ -254,8 +259,8 @@ Portable repository skills follow the [Agent Skills specification](https://agent
 | --- | --- |
 | `just build` | Build the application |
 | `just run` | Run the server |
-| `just install` | Fetch locked dependencies and install current Cargo maintenance and QA tools |
-| `just install-tools` | Install current Cargo maintenance and QA tools |
+| `just install` | Fetch locked dependencies and install pinned Cargo maintenance and QA tools |
+| `just install-tools` | Install pinned Cargo maintenance and QA tools |
 | `just download` | Fetch locked Cargo dependencies |
 | `just update` | Upgrade all direct requirements and refresh all locked transitive dependencies |
 | `just fmt` | Apply formatting |
