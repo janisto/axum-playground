@@ -316,7 +316,17 @@ async fn fixed_document_negotiation_honors_parameters_exclusions_and_repeated_ac
         (
             "/.well-known/api-catalog",
             &["application/linkset+json; q=1; profile=ignored"],
+            StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
+            "/.well-known/api-catalog",
+            &["application/linkset+json; q=1; profile=\"https://www.rfc-editor.org/info/rfc9727\""],
             StatusCode::OK,
+        ),
+        (
+            "/.well-known/api-catalog",
+            &["application/linkset+json; q=1; unknown=value"],
+            StatusCode::NOT_ACCEPTABLE,
         ),
         (
             "/.well-known/api-catalog",
@@ -336,6 +346,13 @@ async fn fixed_document_negotiation_honors_parameters_exclusions_and_repeated_ac
             StatusCode::NOT_ACCEPTABLE,
         ),
         (
+            "/.well-known/api-catalog",
+            &[
+                "application/linkset+json;q=0;profile=\"https://www.rfc-editor.org/info/rfc9727\", application/linkset+json;q=1",
+            ],
+            StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
             "/llms.txt",
             &["text/plain; charset=\"UTF-8\""],
             StatusCode::OK,
@@ -347,7 +364,22 @@ async fn fixed_document_negotiation_honors_parameters_exclusions_and_repeated_ac
         ),
         (
             "/llms.txt",
+            &["text/plain; q=1; charset=latin1"],
+            StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
+            "/llms.txt",
+            &["text/plain; q=1; charset=UTF-8"],
+            StatusCode::OK,
+        ),
+        (
+            "/llms.txt",
             &["text/plain;q=0, text/*;q=1"],
+            StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
+            "/llms.txt",
+            &["text/plain;q=0;charset=utf-8, text/plain;q=1"],
             StatusCode::NOT_ACCEPTABLE,
         ),
         (
@@ -365,6 +397,11 @@ async fn fixed_document_negotiation_honors_parameters_exclusions_and_repeated_ac
             "/openapi.json",
             &["application/json; charset=UTF-8"],
             StatusCode::OK,
+        ),
+        (
+            "/openapi.json",
+            &["application/json; q=1; charset=latin1"],
+            StatusCode::NOT_ACCEPTABLE,
         ),
         (
             "/openapi.json",
@@ -464,6 +501,11 @@ async fn documentation_queries_methods_and_head_errors_are_json_and_side_effect_
         (
             "/.well-known/api-catalog",
             "application/cbor",
+            StatusCode::NOT_ACCEPTABLE,
+        ),
+        (
+            "/.well-known/api-catalog",
+            "application/linkset+json;q=1;profile=wrong",
             StatusCode::NOT_ACCEPTABLE,
         ),
     ] {

@@ -207,7 +207,6 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
     }
 
     let mut quality = 1.0;
-    let mut quality_seen = false;
     let mut names = BTreeSet::new();
     let mut media_parameters = Vec::new();
     for part in parts.iter().skip(1) {
@@ -218,16 +217,10 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
             return None;
         }
         if name == "q" {
-            if quality_seen {
-                return None;
-            }
             quality = parse_quality(raw_value.trim())?;
-            quality_seen = true;
         } else {
             let value = decode_parameter(raw_value.trim())?;
-            if !quality_seen {
-                media_parameters.push((name, value));
-            }
+            media_parameters.push((name, value));
         }
     }
 
@@ -414,6 +407,12 @@ mod tests {
             negotiate_problem_representation(&headers("application/problem+json;charset=utf-8")),
             Representation::JsonUtf8
         );
+        assert_eq!(
+            negotiate_problem_representation(&headers(
+                "application/problem+json;q=1;charset=UTF-8"
+            )),
+            Representation::JsonUtf8
+        );
     }
 
     #[test]
@@ -471,12 +470,15 @@ mod tests {
         ] {
             assert!(parse_range(value).is_none(), "{value}");
         }
-        let range = parse_range("Application/JSON; Charset=\"utf\\-8\"; q=0.125; ignored=late")
+        let range = parse_range("Application/JSON; Charset=\"utf\\-8\"; q=0.125; profile=example")
             .expect("valid range");
         assert_eq!(range.media_type, "application/json");
         assert_eq!(
             range.media_parameters,
-            [("charset".to_owned(), "utf-8".to_owned())]
+            [
+                ("charset".to_owned(), "utf-8".to_owned()),
+                ("profile".to_owned(), "example".to_owned()),
+            ]
         );
         assert_eq!(range.quality, 0.125);
     }

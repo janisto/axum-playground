@@ -78,7 +78,7 @@ Schema, catalog, and usage-guide errors always use plain JSON Problem Details.
 
 - JSON is the default and wins equal-quality ties.
 - CBOR is selected when it outranks JSON. A wildcard alone ties the representations and JSON wins, but a wildcard can select CBOR when a more-specific range excludes JSON, such as `application/json;q=0, application/*;q=1`.
-- Exact exclusions and media-range specificity follow RFC 9110. Unsupported success representations return 406 before endpoint work begins.
+- Exact exclusions and media-range specificity follow RFC 9110. Media parameters apply on either side of `q`. Unsupported success representations return 406 before endpoint work begins.
 - Request bodies must declare exactly one `Content-Type` value of `application/json` or exact `application/cbor`. Vendor `+cbor` types are not treated as interchangeable, a CBOR body must contain exactly one data item, and `Content-Encoding` is limited to absent or a single `identity` value.
 - Problems use `application/problem+json` by default and `application/cbor` under the same quality and specificity rules. Error negotiation is best effort so an existing error is not replaced by a second 406.
 - Bodyless 204 responses ignore `Accept`.

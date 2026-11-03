@@ -44,9 +44,11 @@ auxiliary-tool constraint: the CLI's `superstatic` dependency does not yet
 support Node 26. The application itself runs on Rust.
 
 No Google account or ADC is needed for local emulators. Firestore uses the
-SDK's native stub credentials. Production rejects emulator configuration;
-future live Firebase access requires real credentials and explicit production
-configuration. Never send unsigned emulator tokens to live services.
+SDK's native stub credentials. Configure both loopback hosts together in
+development/test, with the same `demo-*` Firebase and effective Firestore project.
+Leave project fallbacks unset or match that project. Production rejects emulator
+configuration; future live Firebase access requires real credentials and explicit
+production configuration. Never send unsigned emulator tokens to live services.
 
 ## Discovery from an origin
 
@@ -136,7 +138,8 @@ Private or inaccessible GitHub resources are not exposed.
 ## Requests, representations, and validation
 
 Send `Accept: application/json` for ordinary API success, or
-`Accept: application/cbor` for CBOR. JSON is the default. An explicit `q=0`
+`Accept: application/cbor` for CBOR. JSON is the default. Media parameters apply
+on either side of `q`. An explicit `q=0`
 exclusion overrides broader wildcard ranges. Unsupported success negotiation
 returns 406 before authentication, persistence, or provider calls for operations
 with response bodies. Successful DELETE has no representation. CBOR uses
