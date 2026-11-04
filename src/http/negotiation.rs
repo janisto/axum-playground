@@ -232,10 +232,14 @@ fn parse_range(value: &str) -> Option<ParsedRange> {
 }
 
 fn split_quoted_commas(value: &str) -> Vec<String> {
-    split_outside_quotes(value, ',').unwrap_or_else(|| vec![value.to_owned()])
+    split_quoted(value, ',', true).unwrap_or_default()
 }
 
 pub(crate) fn split_outside_quotes(value: &str, delimiter: char) -> Option<Vec<String>> {
+    split_quoted(value, delimiter, false)
+}
+
+fn split_quoted(value: &str, delimiter: char, ignore_incomplete: bool) -> Option<Vec<String>> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut quoted = false;
@@ -257,7 +261,7 @@ pub(crate) fn split_outside_quotes(value: &str, delimiter: char) -> Option<Vec<S
         }
     }
     if quoted || escaped {
-        return None;
+        return ignore_incomplete.then_some(parts);
     }
     parts.push(value[start..].to_owned());
     Some(parts)

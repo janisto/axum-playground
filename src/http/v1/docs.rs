@@ -624,6 +624,9 @@ fn strengthen_operations(document: &mut Value) {
             };
             for (status, response) in responses {
                 add_common_response_headers(response, !(method == "delete" && status == "204"));
+                if path_name == "/health" && method == "get" && status == "200" {
+                    response["headers"]["Link"]["required"] = json!(true);
+                }
                 if let Some(code) = problem_code_for_response(path_name, status) {
                     for media_type in ["application/problem+json", "application/cbor"] {
                         if response["content"].get(media_type).is_some() {
