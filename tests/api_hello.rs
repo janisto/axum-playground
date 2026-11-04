@@ -233,6 +233,8 @@ async fn hello_media_metadata_and_accept_precedence_are_exact() {
         "application/example+cbor",
         "application/cbor; charset=utf-8",
         "application/json, application/cbor",
+        "application/json; charset=\"unterminated",
+        "application/json; charset=\"trailing\\",
     ] {
         let response = build_app(test_state())
             .oneshot(

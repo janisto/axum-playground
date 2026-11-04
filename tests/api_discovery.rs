@@ -273,6 +273,14 @@ async fn health_and_documentation_advertise_typed_discovery_for_every_representa
                     ["type"],
                 "string"
             );
+            assert_eq!(
+                schema["paths"]["/health"]["get"]["responses"]["200"]["headers"]["Link"]["required"],
+                true
+            );
+            assert_ne!(
+                schema["paths"]["/v1/items"]["get"]["responses"]["200"]["headers"]["Link"]["required"],
+                true
+            );
         }
     }
     let initializer = request(Method::GET, "/api-docs/swagger-initializer.js", &[]).await;
@@ -538,5 +546,63 @@ async fn documentation_does_not_serve_other_repository_files_or_aliases() {
     ] {
         let response = request(Method::GET, path, &[]).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn accept_keeps_complete_ranges_before_an_unfinished_quoted_tail() {
+    for tail in [
+        r#"text/plain;profile="unterminated"#,
+        "text/plain;profile=\"trailing\\",
+    ] {
+        for (path, valid, status, media) in [
+            (
+                "/health",
+                "application/json",
+                StatusCode::OK,
+                "application/json",
+            ),
+            (
+                "/health",
+                "application/cbor",
+                StatusCode::OK,
+                "application/cbor",
+            ),
+            (
+                "/openapi.json",
+                "application/json",
+                StatusCode::OK,
+                "application/json",
+            ),
+            (
+                "/.well-known/api-catalog",
+                "application/linkset+json",
+                StatusCode::OK,
+                CATALOG_TYPE,
+            ),
+            (
+                "/health?unknown=1",
+                "application/cbor",
+                StatusCode::BAD_REQUEST,
+                "application/cbor",
+            ),
+            (
+                "/health",
+                "application/json;q=0",
+                StatusCode::NOT_ACCEPTABLE,
+                "application/problem+json",
+            ),
+        ] {
+            let accept = format!("{valid}, {tail}");
+            let response = request(Method::GET, path, &[&accept]).await;
+            assert_eq!(response.status(), status, "{path}: {accept}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                media,
+                "{path}: {accept}"
+            );
+        }
+        let response = request(Method::GET, "/health", &[tail]).await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE, "{tail}");
     }
 }
